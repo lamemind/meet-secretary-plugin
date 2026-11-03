@@ -260,25 +260,6 @@ final class Rephraser {
         }
     }
 
-    static Map<String, String> themes(List<String> themeLines) {
-        Map<String, String> themes = new LinkedHashMap<>();
-        mergeThemes(themes, themeLines);
-        return themes;
-    }
-
-    /**
-     * Le righe di un file di configurazione, senza le vuote e quelle che cominciano con #. Un file
-     * assente da' una lista vuota.
-     */
-    static List<String> configurationLines(Path file) throws IOException {
-        if (!Files.isRegularFile(file))
-            return List.of();
-        return Files.readAllLines(file, StandardCharsets.UTF_8).stream()
-                .map(String::strip)
-                .filter(line -> !line.isEmpty() && !line.startsWith("#"))
-                .toList();
-    }
-
     //</editor-fold>
 
     //<editor-fold desc="Utilita'" defaultstate="collapsed">

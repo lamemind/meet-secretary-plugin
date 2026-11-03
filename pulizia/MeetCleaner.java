@@ -8,7 +8,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
-import java.nio.file.attribute.FileTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
@@ -27,6 +26,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.ToLongFunction;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 import java.util.stream.Stream;
 
 /**
@@ -45,19 +45,22 @@ import java.util.stream.Stream;
  * lascia fermo. Tetto: quando la riga aperta piu' vecchia aspetta da 60 s, o le righe aperte sono
  * 20, chiede la chiusura forzata. All'aggancio in ritardo pulisce prima l'arretrato a blocchi di 60
  * righe, poi passa al giro. I tratti consecutivi con la stessa etichetta formano una fascia; alla
- * chiusura di una fascia chiede il titolo. Un tratto col tema fra quelli di `<stamp>.temi` da' un
- * evento; nome del segretario e parole di `<stamp>.parole` passano da Triggers, senza claude.
+ * chiusura di una fascia chiede il titolo. Un tratto di lavoro con un tema del file di settings da'
+ * un evento; nome del segretario e parole chiave passano da Triggers, senza claude.
  *
  * Tre modi. Dal vivo (il diario non ha ancora `fine`) segue il file e finisce dopo la riga `fine`
  * del diario. Concluso (il diario ha `fine`) pulisce tutto a blocchi ed esce. Replay (`--replay`)
  * rifa' il meet registrato con un orologio simulato: una riga arriva all'ora in cui il diario dice
  * che il lettore l'ha scritta, e la durata vera delle chiamate sposta l'orologio.
  *
- * `<stamp>.glossario`, quando c'e', aggiunge righe al glossario del plugin.
+ * Temi, parole chiave, glossario e nome del segretario stanno nel file di settings del progetto,
+ * `.meet-secretary/settings.ini` (ProjectSettings); la voce dell'utente sta nella chiave `voce` di
+ * %LOCALAPPDATA%\meet-recorder\config.properties, accanto a `cartella`. Lo script li rilegge a ogni
+ * giro: un cambio entra nella pulizia senza rilanciarla. Il plugin non porta temi ne' glossario.
  *
- * Il processo claude si riavvia quando cambia il system prompt (temi o glossario del meet), ogni N
- * chunk, o quando il contesto e' cresciuto oltre una soglia; dopo il riavvio il primo chunk porta
- * contesto, partecipanti e argomento in corso.
+ * Il processo claude si riavvia quando cambia il system prompt (temi o glossario del file di
+ * settings), ogni N chunk, o quando il contesto e' cresciuto oltre una soglia; dopo il riavvio il
+ * primo chunk porta contesto, partecipanti e argomento in corso.
  *
  * Una pulizia sola per meet: una seconda istanza sullo stesso meet esce subito con 4.
  *
@@ -82,18 +85,25 @@ public class MeetCleaner {
 
     static final String RAW_THEME = "grezzo";
     static final int EXIT_ALREADY_RUNNING = 4;
+    private static final String MEET_DIRECTORY_KEY = "cartella";
+    private static final String USER_VOICE_KEY = "voce";
     private static final Pattern MEET_FILE_NAME = Pattern.compile("^[^.]+\\.tsv$");
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm:ss");
 
     enum Mode { LIVE, CONCLUDED, REPLAY }
 
-    record Options(Path meetFile, Path meetDirectory, Path projectDirectory, Path configDirectory, boolean replay,
-                   String tag, ClaudeSession.Settings claude, int restartChunks, long restartContextGrowth,
-                   String userVoice, String nameRegex, int maxTurns, List<Long> watchedPids) {
+    /**
+     * userVoiceArgument e nameRegexArgument vengono da --voce-utente e --nome, e quando ci sono
+     * battono il file; null quando mancano.
+     */
+    record Options(Path meetFile, Path meetDirectory, Path projectDirectory, Path configDirectory, Path settingsFile,
+                   boolean replay, String tag, ClaudeSession.Settings claude, int restartChunks,
+                   long restartContextGrowth, String userVoiceArgument, String nameRegexArgument, int maxTurns,
+                   List<Long> watchedPids) {
     }
 
     record Outputs(Path segments, Path index, Path events, Path bookmark, Path prompt, Path calls, Path replies,
-                   Path summary, Path activeThemes, Path keywords, Path meetGlossary, Path lock, Path pid) {
+                   Path summary, Path lock, Path pid) {
     }
 
     private static final class Band {
@@ -152,9 +162,14 @@ public class MeetCleaner {
     private String pendingRestartReason;
     private final Set<String> participantsSent = new LinkedHashSet<>();
 
-    private Set<String> activeThemes = Set.of();
+    private ProjectSettings settings = ProjectSettings.empty();
+    private String settingsDescription;
+    private boolean settingsUnreadableWarned;
     private final Set<String> warnedThemeLines = new LinkedHashSet<>();
-    private FileTime keywordsModified;
+    private String appliedVoice;
+    private String appliedNameRegex;
+    private boolean nameActive;
+    private boolean secretaryApplied;
     private Band openBand;
     private final Deque<Band> bandsAwaitingTitle = new ArrayDeque<>();
 
@@ -201,11 +216,8 @@ public class MeetCleaner {
         }
         MeetFeed feed = mode == Mode.LIVE ? MeetFeed.live(options.meetFile(), diary)
                 : MeetFeed.recorded(options.meetFile(), diary);
-        Pattern namePattern = options.nameRegex() == null || options.nameRegex().isBlank() ? null
-                : Pattern.compile(options.nameRegex(), Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
-        Triggers triggers = new Triggers(options.userVoice(), namePattern);
 
-        MeetCleaner cleaner = new MeetCleaner(options, mode, outputs, feed, triggers);
+        MeetCleaner cleaner = new MeetCleaner(options, mode, outputs, feed, new Triggers());
         Runtime.getRuntime().addShutdownHook(new Thread(cleaner::killSession));
         System.exit(cleaner.run());
     }
@@ -218,8 +230,10 @@ public class MeetCleaner {
         System.out.println("pulizia di " + options.meetFile().getFileName() + "  --  modo " + mode.name().toLowerCase(Locale.ROOT)
                 + ", modello " + options.claude().model() + (options.claude().effort() == null ? "" : ", effort " + options.claude().effort())
                 + ", progetto " + options.projectDirectory() + ", segnalibro " + bookmark);
+        System.out.println("file di settings: " + options.settingsFile()
+                + (Files.isRegularFile(options.settingsFile()) ? "" : " (assente: nessun tema, nessuna parola, nessun nome)"));
 
-        reloadControls();
+        reloadSettings();
         long startMillis;
         if (mode == Mode.LIVE) {
             feed.refresh(wallMillis());
@@ -258,8 +272,8 @@ public class MeetCleaner {
         long tickMillis = tickBaseMillis;
         while (options.maxTurns() == 0 || turns.size() < options.maxTurns()) {
             long nowMillis = now();
+            reloadSettings();
             refreshFeed(nowMillis);
-            reloadControls();
             int available = feed.size();
             if (bookmark >= available) {
                 if (feed.finished())
@@ -417,12 +431,16 @@ public class MeetCleaner {
 
     //<editor-fold desc="Tratti, fasce ed eventi">
 
+    /**
+     * Ogni tema del file di settings e' attivo: un tratto di lavoro con un tema del system prompt da'
+     * un evento, `altro` no. Il system prompt porta i temi del file letti all'inizio del chunk.
+     */
     private void applySegments(List<Rephraser.Segment> segments, long endMillis) throws IOException {
         Map<String, int[]> themeRanges = new LinkedHashMap<>();
         for (Rephraser.Segment segment : segments) {
             writeSegment(segment);
             addToBand(segment);
-            if (segment.work() && activeThemes.contains(segment.theme()))
+            if (segment.work() && sessionThemes.contains(segment.theme()))
                 themeRanges.merge(segment.theme(), new int[] {segment.from(), segment.to()},
                         (known, added) -> new int[] {Math.min(known[0], added[0]), Math.max(known[1], added[1])});
         }
@@ -520,11 +538,9 @@ public class MeetCleaner {
      * Avvia o riavvia il processo quando serve, e dice perche'; null se resta quello di prima.
      */
     private String ensureSession() throws IOException {
-        Map<String, String> themes = Rephraser.themes(Rephraser.configurationLines(configFile("temi.txt")));
-        Rephraser.mergeThemes(themes, meetThemeLines());
-        List<String> glossary = new ArrayList<>(Rephraser.configurationLines(configFile("glossario.txt")));
-        glossary.addAll(Rephraser.configurationLines(outputs.meetGlossary()));
-        String prompt = Rephraser.systemPrompt(configFile("istruzioni.md"), glossary, themes);
+        Map<String, String> themes = validThemes(settings.lines(ProjectSettings.THEMES));
+        String prompt = Rephraser.systemPrompt(configFile("istruzioni.md"),
+                settings.lines(ProjectSettings.GLOSSARY), themes);
 
         String reason;
         if (session == null)
@@ -571,43 +587,86 @@ public class MeetCleaner {
 
     //</editor-fold>
 
-    //<editor-fold desc="File di controllo e ripresa">
+    //<editor-fold desc="Impostazioni e ripresa">
 
     /**
-     * `<stamp>.temi`: i temi attivi, `nome` o `nome: keyword, keyword`; un tema fuori dalla lista
-     * del plugin entra nel system prompt. `<stamp>.parole`: una parola chiave per riga. Si rileggono
-     * a ogni giro.
+     * Rilegge a ogni giro il file di settings e la voce dell'utente. Parole chiave, voce e nome
+     * valgono subito, nei trigger; temi e glossario al chunk dopo, che riavvia claude perche' il
+     * system prompt e' cambiato. Un file che non si legge lascia le impostazioni di prima, con un
+     * avviso; un file assente le svuota.
      */
-    private void reloadControls() throws IOException {
-        Set<String> names = new LinkedHashSet<>();
-        for (String line : Rephraser.configurationLines(outputs.activeThemes())) {
-            int colon = line.indexOf(':');
-            names.add((colon < 0 ? line : line.substring(0, colon)).strip().toLowerCase(Locale.ROOT));
+    private void reloadSettings() {
+        try {
+            settings = ProjectSettings.read(options.settingsFile());
+            settingsUnreadableWarned = false;
+        } catch (IOException unreadable) {
+            if (!settingsUnreadableWarned)
+                System.out.println(clock(now()) + " impostazioni illeggibili, tengo quelle di prima: " + unreadable);
+            settingsUnreadableWarned = true;
         }
-        activeThemes = Set.copyOf(names);
-        FileTime modified = Files.exists(outputs.keywords()) ? Files.getLastModifiedTime(outputs.keywords()) : null;
-        if (!Objects.equals(modified, keywordsModified)) {
-            triggers.setKeywords(Rephraser.configurationLines(outputs.keywords()));
-            keywordsModified = modified;
+        triggers.setKeywords(settings.lines(ProjectSettings.KEYWORDS));
+        applySecretary();
+        String description = describeSettings();
+        if (!description.equals(settingsDescription)) {
+            System.out.println((settingsDescription == null ? "" : clock(now()) + " ") + "impostazioni: " + description);
+            settingsDescription = description;
         }
     }
 
     /**
-     * Le righe valide di `<stamp>.temi`: un nome di tema non valido si scarta con un avviso, invece
-     * di fermare la pulizia per un errore di battitura.
+     * La voce dell'utente dalla chiave `voce` di config.properties, la regex del nome dalla sezione
+     * [segretario]; --voce-utente e --nome li battono. Una regex che non compila spegne il nome, con
+     * un avviso, invece di fermare la pulizia.
      */
-    private List<String> meetThemeLines() throws IOException {
-        List<String> valid = new ArrayList<>();
-        for (String line : Rephraser.configurationLines(outputs.activeThemes())) {
+    private void applySecretary() {
+        String voice = options.userVoiceArgument() != null ? options.userVoiceArgument()
+                : recorderConfiguration().get(USER_VOICE_KEY);
+        String regex = options.nameRegexArgument() != null ? options.nameRegexArgument()
+                : settings.value(ProjectSettings.SECRETARY, "nome");
+        voice = voice == null || voice.isBlank() ? null : voice.strip();
+        regex = regex == null || regex.isBlank() ? null : regex;
+        if (secretaryApplied && Objects.equals(voice, appliedVoice) && Objects.equals(regex, appliedNameRegex))
+            return;
+        Pattern pattern = null;
+        if (regex != null)
             try {
-                Rephraser.themes(List.of(line));
-                valid.add(line);
+                pattern = Pattern.compile(regex, Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+            } catch (PatternSyntaxException invalid) {
+                System.out.println(clock(now()) + " regex del nome non valida, nome spento: "
+                        + invalid.getDescription() + " in " + regex);
+            }
+        triggers.setSecretary(voice, pattern);
+        appliedVoice = voice;
+        appliedNameRegex = regex;
+        nameActive = pattern != null;
+        secretaryApplied = true;
+    }
+
+    /**
+     * I temi della sezione [temi], `nome` o `nome: keyword, keyword`: un nome di tema non valido si
+     * scarta con un avviso, invece di fermare la pulizia per un errore di battitura.
+     */
+    private Map<String, String> validThemes(List<String> themeLines) {
+        Map<String, String> themes = new LinkedHashMap<>();
+        for (String line : themeLines) {
+            try {
+                Rephraser.mergeThemes(themes, List.of(line));
             } catch (IllegalArgumentException invalid) {
                 if (warnedThemeLines.add(line))
-                    System.out.println("temi del meet: " + invalid.getMessage() + ", riga ignorata");
+                    System.out.println("temi del file di settings: " + invalid.getMessage() + ", riga ignorata");
             }
         }
-        return valid;
+        return themes;
+    }
+
+    private String describeSettings() {
+        List<String> keywords = settings.lines(ProjectSettings.KEYWORDS);
+        Set<String> themes = validThemes(settings.lines(ProjectSettings.THEMES)).keySet();
+        return "temi " + (themes.isEmpty() ? "nessuno" : String.join(", ", themes))
+                + "; parole " + (keywords.isEmpty() ? "nessuna" : String.join(", ", keywords))
+                + "; righe di glossario " + settings.lines(ProjectSettings.GLOSSARY).size()
+                + "; nome " + (nameActive ? appliedNameRegex : "spento")
+                + " sulla voce " + (appliedVoice == null ? "non configurata" : appliedVoice);
     }
 
     /**
@@ -1033,38 +1092,45 @@ public class MeetCleaner {
                 meetDirectory.resolve(base + ".eventi.tsv"), meetDirectory.resolve(base + ".segnalibro-pulizia"),
                 meetDirectory.resolve(base + ".pulizia.prompt.md"), meetDirectory.resolve(base + ".pulizia.chiamate.tsv"),
                 meetDirectory.resolve(base + ".pulizia.risposte.txt"), meetDirectory.resolve(base + ".pulizia.sintesi.txt"),
-                meetDirectory.resolve(stamp + ".temi"), meetDirectory.resolve(stamp + ".parole"),
-                meetDirectory.resolve(stamp + ".glossario"), meetDirectory.resolve(base + ".pulizia.lock"),
-                meetDirectory.resolve(base + ".pulizia.pid"));
+                meetDirectory.resolve(base + ".pulizia.lock"), meetDirectory.resolve(base + ".pulizia.pid"));
     }
 
     /**
-     * La cartella dei meet di meet-recorder: la chiave `cartella` di
-     * %LOCALAPPDATA%\meet-recorder\config.properties. Una riga per chiave, chiave=valore, righe # di
-     * commento, senza escape: per questo non si legge con java.util.Properties, che dei backslash dei
-     * path fa escape. Senza file o senza chiave vale il default del registratore,
-     * %USERPROFILE%\meet-teams.
+     * Le chiavi di %LOCALAPPDATA%\meet-recorder\config.properties, il file della persona sulla
+     * macchina: `cartella`, la cartella dei meet, e `voce`, il nome dell'utente come lo scrive Teams
+     * nei sottotitoli. Una riga per chiave, chiave=valore, righe # di commento, senza escape: per
+     * questo non si legge con java.util.Properties, che dei backslash dei path fa escape. Senza file,
+     * nessuna chiave.
      */
-    private static Path defaultMeetDirectory() {
+    private static Map<String, String> recorderConfiguration() {
         String localAppData = System.getenv("LOCALAPPDATA");
         Path configFile = (localAppData == null || localAppData.isBlank()
                 ? Path.of(System.getProperty("user.home"), "AppData", "Local") : Path.of(localAppData))
                 .resolve("meet-recorder").resolve("config.properties");
+        Map<String, String> values = new HashMap<>();
         try {
-            for (String rawLine : Files.readAllLines(configFile, StandardCharsets.UTF_8)) {
+            for (String rawLine : new String(Files.readAllBytes(configFile), StandardCharsets.UTF_8).lines().toList()) {
                 String line = rawLine.strip();
                 if (line.startsWith("﻿"))
                     line = line.substring(1).strip();
                 int separator = line.indexOf('=');
                 if (line.startsWith("#") || line.startsWith("!") || separator <= 0)
                     continue;
-                String value = line.substring(separator + 1).strip();
-                if (line.substring(0, separator).strip().equals("cartella") && !value.isEmpty()
-                        && Path.of(value).isAbsolute())
-                    return Path.of(value);
+                values.put(line.substring(0, separator).strip(), line.substring(separator + 1).strip());
             }
         } catch (IOException noConfiguration) {
         }
+        return values;
+    }
+
+    /**
+     * La cartella dei meet di meet-recorder, la chiave `cartella` di config.properties. Senza file,
+     * senza chiave o con un path non assoluto vale il default del registratore, %USERPROFILE%\meet-teams.
+     */
+    private static Path defaultMeetDirectory() {
+        String configured = recorderConfiguration().get(MEET_DIRECTORY_KEY);
+        if (configured != null && !configured.isEmpty() && Path.of(configured).isAbsolute())
+            return Path.of(configured);
         String profile = System.getenv("USERPROFILE");
         return (profile == null || profile.isBlank() ? Path.of(System.getProperty("user.home")) : Path.of(profile))
                 .resolve("meet-teams");
@@ -1103,22 +1169,6 @@ public class MeetCleaner {
     private static String baseName(Path meetFile) {
         String name = meetFile.getFileName().toString();
         return name.endsWith(".tsv") ? name.substring(0, name.length() - ".tsv".length()) : name;
-    }
-
-    /**
-     * `voce:` e `nome:` dal file segretario.txt della configurazione; gli argomenti li battono.
-     */
-    private static Map<String, String> secretaryConfiguration(Path configDirectory) {
-        Map<String, String> values = new HashMap<>();
-        try {
-            for (String line : Rephraser.configurationLines(configDirectory.resolve("segretario.txt"))) {
-                int colon = line.indexOf(':');
-                if (colon > 0)
-                    values.put(line.substring(0, colon).strip(), line.substring(colon + 1).strip());
-            }
-        } catch (IOException ignored) {
-        }
-        return values;
     }
 
     private static Options parseOptions(String[] args) {
@@ -1184,14 +1234,10 @@ public class MeetCleaner {
             throw new IllegalArgumentException("file del meet assente: " + meetFile);
         if (replay && tag == null)
             tag = "replay";
-        Map<String, String> secretary = secretaryConfiguration(configDirectory);
-        if (userVoice == null)
-            userVoice = secretary.get("voce");
-        if (nameRegex == null)
-            nameRegex = secretary.get("nome");
-        Path settingsFile = configDirectory.resolve("settings.json");
-        return new Options(meetFile.toAbsolutePath(), meetDirectory, projectDirectory, configDirectory, replay, tag,
-                new ClaudeSession.Settings(claudeExecutable, model, effort, settingsFile, "Read,Grep,Glob"),
+        Path claudeSettingsFile = configDirectory.resolve("settings.json");
+        return new Options(meetFile.toAbsolutePath(), meetDirectory, projectDirectory, configDirectory,
+                ProjectSettings.file(projectDirectory), replay, tag,
+                new ClaudeSession.Settings(claudeExecutable, model, effort, claudeSettingsFile, "Read,Grep,Glob"),
                 restartChunks, restartContextGrowth, userVoice, nameRegex, maxTurns, List.copyOf(watchedPids));
     }
 

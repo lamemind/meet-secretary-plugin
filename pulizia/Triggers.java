@@ -7,13 +7,17 @@ import java.util.regex.Pattern;
  * Gli eventi che non passano da claude: il nome del segretario e le parole chiave, cercati con una
  * regex sul testo grezzo, cosi' scattano in pochi secondi invece dei circa 20 della pulizia.
  *
- * Parola chiave: una riga di qualunque voce che contiene una parola di `<stamp>.parole`, senza
- * distinzione fra maiuscole e minuscole e a parola intera, da' un evento su quella riga.
+ * Parola chiave: una riga di qualunque voce che contiene una parola della sezione `[parole]` del
+ * file di settings, senza distinzione fra maiuscole e minuscole e a parola intera, da' un evento su
+ * quella riga.
  *
  * Nome: conta solo sulle righe della voce dell'utente. Il turno dell'utente e' la sequenza delle sue
  * righe consecutive; finisce quando parla un'altra voce o dopo 3 s senza righe nuove. Un turno con
  * il nome da' un evento alla sua fine, con le righe di tutto il turno: cosi' l'evento porta la
- * richiesta intera, detta prima o dopo il nome, e non solo il nome.
+ * richiesta intera, detta prima o dopo il nome, e non solo il nome. Senza voce dell'utente o senza
+ * regex del nome, il nome non da' eventi.
+ *
+ * Parole, voce e regex si cambiano a pulizia accesa: valgono dalla prima riga letta dopo il cambio.
  */
 final class Triggers {
 
@@ -22,8 +26,8 @@ final class Triggers {
     record Event(long millis, String kind, int from, int to, String detail) {
     }
 
-    private final String userVoice;
-    private final Pattern namePattern;
+    private String userVoice;
+    private Pattern namePattern;
     private List<String> keywords = List.of();
     private List<Pattern> keywordPatterns = List.of();
 
@@ -33,9 +37,9 @@ final class Triggers {
     private long turnLastMillis;
     private boolean turnNamed;
 
-    Triggers(String userVoice, Pattern namePattern) {
-        this.userVoice = userVoice;
-        this.namePattern = namePattern;
+    synchronized void setSecretary(String voice, Pattern pattern) {
+        userVoice = voice;
+        namePattern = pattern;
     }
 
     synchronized void resumeAfter(int lineNumber) {
