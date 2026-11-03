@@ -85,8 +85,8 @@ if [ -n "$batch_seconds" ]; then
 else
     # Dal file di settings, all'avvio: un cambio vale dal riarmo dopo. Un valore non valido non ferma il
     # follower, che resterebbe muto per tutto il meet: vale il default, con un avviso su stderr.
-    settings_file="$(meet_settings_file "${project_dir:-$PWD}")"
-    batch_seconds="$(meet_settings_value "$settings_file" segui batch)" || batch_seconds=""
+    meet_settings_load "$project_dir"
+    meet_settings_value_into segui batch batch_seconds
     if [ -n "$batch_seconds" ] && ! [[ "$batch_seconds" =~ ^[0-9]+$ ]]; then
         echo "meet-follow: batch non valido nel file di settings ($batch_seconds): uso $MEET_DEFAULT_BATCH_SECONDS s" >&2
         batch_seconds=""

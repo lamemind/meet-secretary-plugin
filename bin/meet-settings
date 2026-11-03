@@ -99,9 +99,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-project_dir="$(meet_unix_path "${project_dir:-$PWD}")"
+project_dir="${project_dir:-$PWD}"
+meet_unix_path_var project_dir
 [ -d "$project_dir" ] || meet_die "cartella del progetto assente: $project_dir"
-settings_file="$(meet_settings_file "$project_dir")"
+meet_settings_load "$project_dir"
+settings_file="$MEET_SETTINGS_FILE"
 
 # Il file e' personale: va nell'ignore locale del repo del progetto, .git/info/exclude, che non si
 # committa. Fuori da un repo git, o con il file gia' ignorato, non scrive niente.
@@ -122,13 +124,14 @@ settings_exclude() {
     local exclude_file
     exclude_file="$(git -C "$project_dir" rev-parse --path-format=absolute --git-path info/exclude 2>/dev/null)"
     [ -n "$exclude_file" ] || { exclude_note="ATTENZIONE: .git/info/exclude non trovato"; return; }
-    exclude_file="$(meet_unix_path "$exclude_file")"
+    meet_unix_path_var exclude_file
     mkdir -p "${exclude_file%/*}" || { exclude_note="ATTENZIONE: .git/info non scrivibile"; return; }
     if [ -s "$exclude_file" ] && [ -n "$(tail -c 1 "$exclude_file")" ]; then
         printf '\n' >> "$exclude_file"
     fi
     printf '%s\n' "# meet-secretary: le impostazioni personali del segretario" ".meet-secretary/" >> "$exclude_file"
-    exclude_note="messo in $(meet_windows_path "$exclude_file")"
+    meet_windows_path_var exclude_file
+    exclude_note="messo in $exclude_file"
 }
 
 created=0
@@ -138,13 +141,16 @@ settings_ensure() {
     meet_write_atomic "$settings_file" "$(settings_template)"$'\n' || meet_die "file non scrivibile: $settings_file"
     created=1
     settings_exclude
+    meet_settings_load "$project_dir"
 }
 
 # Riscrive le voci di una sezione e lascia il resto del file com'e': commenti, righe vuote, altre
 # sezioni. Le voci nuove stanno dove stava la prima voce vecchia, o in fondo alla sezione; una sezione
-# che manca si aggiunge in fondo al file.
+# che manca si aggiunge in fondo al file. Poi rilegge il file.
 settings_replace_section() {
-    local section="$1" lines="$2" content
+    local section="$1" content lines=""
+    shift
+    (( $# > 0 )) && lines="$(printf '%s\n' "$@")"
     content="$(MEET_SECTION_LINES="$lines" LC_ALL=C awk -v wanted="$section" '
         BEGIN {
             count = ENVIRON["MEET_SECTION_LINES"] == "" ? 0 : split(ENVIRON["MEET_SECTION_LINES"], fresh, "\n")
@@ -189,19 +195,22 @@ settings_replace_section() {
             }
         }' "$settings_file")" || meet_die "file di settings illeggibile: $settings_file"
     meet_write_atomic "$settings_file" "$content"$'\n' || meet_die "file non scrivibile: $settings_file"
+    meet_settings_load "$project_dir"
 }
 
-theme_name() {
-    local line="${1%%:*}"
-    meet_trim_var line
-    printf '%s' "${line,,}"
+# Il nome di un tema, nella variabile nominata: la parte prima dei due punti, in minuscolo.
+theme_name_into() {
+    local -n _tn_name="$2"
+    _tn_name="${1%%:*}"
+    meet_trim_var _tn_name
+    _tn_name="${_tn_name,,}"
 }
 
 # La voce sta in config.properties: si riscrive la sua riga, o si aggiunge, e le altre chiavi restano.
 recorder_set_voice() {
     local value="$1" config_file input content
     meet_trim_var value
-    config_file="$(meet_recorder_config_file)"
+    meet_recorder_config_file_var config_file
     input="$config_file"
     [ -f "$input" ] || input=/dev/null
     mkdir -p "${config_file%/*}" || meet_die "cartella non scrivibile: ${config_file%/*}"
@@ -229,48 +238,47 @@ recorder_set_voice() {
     meet_write_atomic "$config_file" "${content:+$content$'\n'}" || meet_die "file non scrivibile: $config_file"
 }
 
-join_lines() {
-    local lines
-    lines="$(paste -sd'|' - | sed 's/|/; /g')"
-    printf '%s' "${lines:-$1}"
-}
-
 settings_ensure
 changed=()
 
 if (( ${#add_themes[@]} + ${#remove_themes[@]} > 0 )); then
-    mapfile -t themes < <(meet_settings_lines "$settings_file" temi)
+    meet_settings_lines_into temi themes
     for theme in "${add_themes[@]}"; do
-        name="$(theme_name "$theme")"
+        theme_name_into "$theme" name
         [[ "$name" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || meet_die "nome di tema non valido: $theme (minuscole, cifre e trattini)"
         kept=()
         for known in "${themes[@]}"; do
-            [ "$(theme_name "$known")" = "$name" ] || kept+=("$known")
+            theme_name_into "$known" known_name
+            [ "$known_name" = "$name" ] || kept+=("$known")
         done
-        case "$theme" in
-            *:*) keywords="${theme#*:}"; meet_trim_var keywords; kept+=("$name${keywords:+: $keywords}") ;;
-            *)   kept+=("$name") ;;
-        esac
+        keywords=""
+        if [[ "$theme" == *:* ]]; then
+            keywords="${theme#*:}"
+            meet_trim_var keywords
+        fi
+        kept+=("$name${keywords:+: $keywords}")
         themes=("${kept[@]}")
     done
     for theme in "${remove_themes[@]}"; do
-        name="$(theme_name "$theme")"
+        theme_name_into "$theme" name
         kept=()
         for known in "${themes[@]}"; do
-            [ "$(theme_name "$known")" = "$name" ] || kept+=("$known")
+            theme_name_into "$known" known_name
+            [ "$known_name" = "$name" ] || kept+=("$known")
         done
         themes=("${kept[@]}")
     done
-    settings_replace_section temi "$(printf '%s\n' "${themes[@]}")"
+    settings_replace_section temi "${themes[@]}"
     changed+=("temi")
 fi
 
 # Parole e glossario: una voce che c'e' gia', a meno delle maiuscole, si riscrive invece di ripetersi.
 update_list() {
-    local section="$1" label="$2" adds_name="$3" removes_name="$4" entry known kept
-    local -n adds="$adds_name" removes="$removes_name"
+    local section="$1" label="$2" entry known
+    local -n adds="$3" removes="$4"
+    local -a entries kept
     (( ${#adds[@]} + ${#removes[@]} > 0 )) || return 0
-    mapfile -t entries < <(meet_settings_lines "$settings_file" "$section")
+    meet_settings_lines_into "$section" entries
     for entry in "${adds[@]}"; do
         meet_trim_var entry
         [ -n "$entry" ] || meet_die "$label vuota"
@@ -289,7 +297,7 @@ update_list() {
         done
         entries=("${kept[@]}")
     done
-    settings_replace_section "$section" "$(printf '%s\n' "${entries[@]}")"
+    settings_replace_section "$section" "${entries[@]}"
     changed+=("$section")
 }
 update_list parole "parola chiave" add_words remove_words
@@ -300,31 +308,45 @@ if (( set_voice )); then
     changed+=("voce")
 fi
 
-# I valori, come li legge la pulizia.
-seconds_or_note() {
-    local value="$1" default_text="$2" invalid_text="$3"
+# I secondi di [segui], nella variabile nominata: il valore, il testo dato se manca, o una nota se non
+# e' un intero.
+seconds_into() {
+    local value="$1" missing_text="$2" invalid_text="$3"
+    local -n _si_text="$4"
     if [ -z "$value" ]; then
-        printf '%s' "$default_text"
+        _si_text="$missing_text"
     elif [[ "$value" =~ ^[0-9]+$ ]]; then
-        printf '%s s' "$value"
+        _si_text="$value s"
     else
-        printf '%s (non valido: %s)' "$value" "$invalid_text"
+        _si_text="$value (non valido: $invalid_text)"
     fi
 }
 
-secretary_name="$(meet_settings_value "$settings_file" segretario segretario)" || secretary_name=""
-name_regex="$(meet_settings_value "$settings_file" segretario nome)" || name_regex=""
-user_voice="$(meet_recorder_config_value voce)" || user_voice=""
-timeout_value="$(meet_settings_value "$settings_file" segui timeout)" || timeout_value=""
-batch_value="$(meet_settings_value "$settings_file" segui batch)" || batch_value=""
+meet_settings_value_into segretario segretario secretary_name
+meet_settings_value_into segretario nome name_regex
+meet_settings_value_into segui timeout timeout_value
+meet_settings_value_into segui batch batch_value
+meet_recorder_config_get voce user_voice
+meet_recorder_config_file_var config_file
+meet_windows_path_var config_file
+meet_settings_join_into temi "; " nessuno themes_text
+meet_settings_join_into parole "; " nessuna words_text
+meet_settings_join_into glossario "; " vuoto glossary_text
+seconds_into "$timeout_value" nessuno "nessun timeout" timeout_text
+seconds_into "$batch_value" "$MEET_DEFAULT_BATCH_SECONDS s" "meet-follow usa $MEET_DEFAULT_BATCH_SECONDS s" batch_text
 
-header="impostazioni: $(meet_windows_path "$settings_file")"
+shown_file="$settings_file"
+meet_windows_path_var shown_file
+header="impostazioni: $shown_file"
 (( created )) && header+=" (creato ora${exclude_note:+; $exclude_note})"
-(( ${#changed[@]} > 0 )) && header+=", aggiornati: $(IFS=,; printf '%s' "${changed[*]}" | sed 's/,/, /g')"
+if (( ${#changed[@]} > 0 )); then
+    changed_text="${changed[*]}"
+    header+=", aggiornati: ${changed_text// /, }"
+fi
 echo "$header"
-echo "temi: $(meet_settings_lines "$settings_file" temi | join_lines nessuno)"
-echo "parole chiave: $(meet_settings_lines "$settings_file" parole | join_lines nessuna)"
-echo "glossario: $(meet_settings_lines "$settings_file" glossario | join_lines vuoto)"
+echo "temi: $themes_text"
+echo "parole chiave: $words_text"
+echo "glossario: $glossary_text"
 echo "segretario: ${secretary_name:-senza nome}, nome ${name_regex:-assente: il nome non sveglia nessuno}"
-echo "voce: ${user_voice:-non configurata: il nome del segretario non sveglia nessuno} ($(meet_windows_path "$(meet_recorder_config_file)"))"
-echo "segui: timeout $(seconds_or_note "$timeout_value" nessuno "nessun timeout"), batch $(seconds_or_note "$batch_value" "$MEET_DEFAULT_BATCH_SECONDS s" "meet-follow usa $MEET_DEFAULT_BATCH_SECONDS s")"
+echo "voce: ${user_voice:-non configurata: il nome del segretario non sveglia nessuno} ($config_file)"
+echo "segui: timeout $timeout_text, batch $batch_text"

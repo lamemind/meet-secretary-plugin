@@ -196,19 +196,27 @@ case "$mode" in
         else
             echo "eventi: nessuno"
         fi
-        settings_file="$(meet_settings_file "${project_dir:-$PWD}")"
-        if [ -f "$settings_file" ]; then
-            echo "impostazioni: $(meet_windows_path "$settings_file")"
+        meet_settings_load "$project_dir"
+        shown_file="$MEET_SETTINGS_FILE"
+        meet_windows_path_var shown_file
+        if [ -f "$MEET_SETTINGS_FILE" ]; then
+            echo "impostazioni: $shown_file"
         else
-            echo "impostazioni: assenti ($(meet_windows_path "$settings_file")), le crea meet-settings"
+            echo "impostazioni: assenti ($shown_file), le crea meet-settings"
         fi
-        secretary_name="$(meet_settings_value "$settings_file" segretario segretario)" || secretary_name=""
-        user_voice="$(meet_recorder_config_value voce)" || user_voice=""
+        meet_settings_value_into segretario segretario secretary_name
+        meet_recorder_config_get voce user_voice
         echo "segretario: ${secretary_name:-senza nome}, chiamato dalla voce ${user_voice:-non configurata}; letto fino al tratto $secretary_segments di $segments_total"
-        themes="$(meet_settings_lines "$settings_file" temi | sed 's/[[:space:]]*:.*//' | tr '[:upper:]' '[:lower:]' | paste -sd'|' - | sed 's/|/, /g')"
-        words="$(meet_settings_lines "$settings_file" parole | paste -sd'|' - | sed 's/|/, /g')"
+        meet_settings_lines_into temi theme_lines
+        themes=""
+        for theme in "${theme_lines[@]}"; do
+            theme="${theme%%:*}"
+            meet_trim_var theme
+            themes+="${themes:+, }${theme,,}"
+        done
+        meet_settings_join_into parole ", " nessuna words
         echo "temi attivi: ${themes:-nessuno}"
-        echo "parole chiave: ${words:-nessuna}"
+        echo "parole chiave: $words"
         exit 0 ;;
 esac
 

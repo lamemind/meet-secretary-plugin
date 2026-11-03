@@ -12,122 +12,174 @@ meet_die() {
     exit 2
 }
 
-# Un path Windows (C:\meet) diventa un path di Git Bash (/c/meet); un path gia' di
-# Git Bash resta com'e'.
-meet_unix_path() {
-    if command -v cygpath >/dev/null 2>&1; then
-        cygpath -u "$1"
-    else
-        printf '%s\n' "$1"
+# Un path Windows (C:\meet) diventa un path di Git Bash (/c/meet); un path gia' di Git Bash resta com'e'.
+# Le due funzioni *_var convertono la variabile nominata, senza subshell. Un path con la lettera del
+# disco si converte in bash, gli altri con cygpath: su Git Bash ogni processo costa decine di
+# millisecondi.
+meet_unix_path_var() {
+    local -n _mp_value="$1"
+    if [[ "$_mp_value" =~ ^([A-Za-z]):[\\/](.*)$ ]]; then
+        local _mp_drive="${BASH_REMATCH[1],,}" _mp_rest="${BASH_REMATCH[2]}"
+        _mp_value="/$_mp_drive/${_mp_rest//\\//}"
+    elif [[ "$_mp_value" == *\\* ]] && command -v cygpath >/dev/null 2>&1; then
+        _mp_value="$(cygpath -u "$_mp_value")"
     fi
+}
+
+meet_windows_path_var() {
+    local -n _mw_value="$1"
+    if [[ "$_mw_value" =~ ^/([A-Za-z])(/(.*))?$ ]]; then
+        local _mw_drive="${BASH_REMATCH[1]^^}" _mw_rest="${BASH_REMATCH[3]}"
+        _mw_value="$_mw_drive:\\${_mw_rest//\//\\}"
+    elif [[ "$_mw_value" == /* ]] && command -v cygpath >/dev/null 2>&1; then
+        _mw_value="$(cygpath -w "$_mw_value")"
+    fi
+}
+
+meet_unix_path() {
+    local _mp_path="$1"
+    meet_unix_path_var _mp_path
+    printf '%s\n' "$_mp_path"
 }
 
 meet_windows_path() {
-    if command -v cygpath >/dev/null 2>&1; then
-        cygpath -w "$1"
-    else
-        printf '%s\n' "$1"
-    fi
+    local _mw_path="$1"
+    meet_windows_path_var _mw_path
+    printf '%s\n' "$_mw_path"
 }
 
-# Toglie gli spazi ai lati del valore della variabile nominata, senza subshell: su Git Bash ogni $(...)
-# e' un fork da decine di millisecondi.
+# Toglie gli spazi ai lati del valore della variabile nominata, senza subshell.
 meet_trim_var() {
-    local -n meet_trimmed="$1"
-    meet_trimmed="${meet_trimmed#"${meet_trimmed%%[![:space:]]*}"}"
-    meet_trimmed="${meet_trimmed%"${meet_trimmed##*[![:space:]]}"}"
+    local -n _mt_value="$1"
+    _mt_value="${_mt_value#"${_mt_value%%[![:space:]]*}"}"
+    _mt_value="${_mt_value%"${_mt_value##*[![:space:]]}"}"
 }
 
 # %LOCALAPPDATA%\meet-recorder\config.properties: il file della persona sulla macchina, che scrive
 # meet-recorder. Chiavi: `cartella`, la cartella dei meet, e `voce`, il nome dell'utente come lo scrive
-# Teams nei sottotitoli.
-meet_recorder_config_file() {
-    local local_app_data="${LOCALAPPDATA:-${USERPROFILE:-$HOME}/AppData/Local}"
-    printf '%s/meet-recorder/config.properties\n' "$(meet_unix_path "$local_app_data")"
+# Teams nei sottotitoli. meet_recorder_config_file_var mette il path nella variabile nominata.
+meet_recorder_config_file_var() {
+    local -n _mc_file="$1"
+    _mc_file="${LOCALAPPDATA:-${USERPROFILE:-$HOME}/AppData/Local}"
+    meet_unix_path_var _mc_file
+    _mc_file="${_mc_file%/}/meet-recorder/config.properties"
 }
 
-# Il valore di una chiave di config.properties: una riga per chiave, chiave=valore, senza escape, i
-# backslash dei path restano come sono. Con la chiave ripetuta vale l'ultima, come per il registratore.
-# Ritorna 1 se la chiave non c'e'.
-meet_recorder_config_value() {
-    local wanted="$1" config_file line key value found=1 configured=""
-    config_file="$(meet_recorder_config_file)"
-    [ -f "$config_file" ] || return 1
-    while IFS= read -r line || [ -n "$line" ]; do
-        line="${line%$'\r'}"
-        line="${line#$'\xef\xbb\xbf'}"
-        meet_trim_var line
-        case "$line" in ''|'#'*|'!'*) continue ;; esac
-        key="${line%%=*}"
-        [ "$key" = "$line" ] && continue
-        value="${line#*=}"
-        meet_trim_var key
-        [ "$key" = "$wanted" ] || continue
-        meet_trim_var value
-        configured="$value"
-        found=0
-    done < "$config_file"
-    printf '%s\n' "$configured"
-    return $found
+meet_recorder_config_file() {
+    local _mc_path
+    meet_recorder_config_file_var _mc_path
+    printf '%s\n' "$_mc_path"
+}
+
+# Il valore di una chiave di config.properties, nella variabile nominata: una riga per chiave,
+# chiave=valore, senza escape, i backslash dei path restano come sono. Con la chiave ripetuta vale
+# l'ultima, come per il registratore. Ritorna 1 se la chiave non c'e'.
+meet_recorder_config_get() {
+    local _mc_wanted="$1" _mc_config _mc_line _mc_key _mc_found=1
+    local -n _mc_result="$2"
+    _mc_result=""
+    meet_recorder_config_file_var _mc_config
+    [ -f "$_mc_config" ] || return 1
+    while IFS= read -r _mc_line || [ -n "$_mc_line" ]; do
+        _mc_line="${_mc_line%$'\r'}"
+        _mc_line="${_mc_line#$'\xef\xbb\xbf'}"
+        meet_trim_var _mc_line
+        case "$_mc_line" in ''|'#'*|'!'*) continue ;; esac
+        _mc_key="${_mc_line%%=*}"
+        [ "$_mc_key" = "$_mc_line" ] && continue
+        meet_trim_var _mc_key
+        [ "$_mc_key" = "$_mc_wanted" ] || continue
+        _mc_result="${_mc_line#*=}"
+        meet_trim_var _mc_result
+        _mc_found=0
+    done < "$_mc_config"
+    return $_mc_found
 }
 
 # Il file di settings del segretario per un progetto: .meet-secretary/settings.ini nella cartella del
-# progetto, la cartella corrente se non e' data. Sezioni [temi], [parole], [glossario], [segretario],
-# [segui], una voce per riga, # per i commenti; lo legge anche la pulizia (ProjectSettings.java).
+# progetto. Sezioni [temi], [parole], [glossario], [segretario], [segui], una voce per riga, # per i
+# commenti; lo legge anche la pulizia, con le stesse regole (ProjectSettings.java).
 MEET_SETTINGS_RELATIVE=".meet-secretary/settings.ini"
 MEET_DEFAULT_BATCH_SECONDS=60
-meet_settings_file() {
-    local project_dir="${1:-$PWD}"
-    project_dir="$(meet_unix_path "$project_dir")"
-    printf '%s/%s\n' "${project_dir%/}" "$MEET_SETTINGS_RELATIVE"
+declare -gA MEET_SETTINGS=()
+MEET_SETTINGS_FILE=""
+
+# Legge il file di settings del progetto in MEET_SETTINGS: una chiave per sezione, col nome in
+# minuscolo, e le sue voci una per riga, senza spazi ai lati. Le righe vuote e i commenti non contano,
+# e nemmeno le righe prima della prima sezione; due sezioni con lo stesso nome si sommano. Un file
+# assente da' le sezioni vuote. Senza cartella vale la cartella corrente; il path del file va in
+# MEET_SETTINGS_FILE.
+meet_settings_load() {
+    local _ms_dir="${1:-$PWD}" _ms_line _ms_section="" _ms_first=1
+    local _ms_header='^\[([^]]+)\]$'
+    meet_unix_path_var _ms_dir
+    MEET_SETTINGS_FILE="${_ms_dir%/}/$MEET_SETTINGS_RELATIVE"
+    MEET_SETTINGS=()
+    [ -f "$MEET_SETTINGS_FILE" ] || return 0
+    while IFS= read -r _ms_line || [ -n "$_ms_line" ]; do
+        _ms_line="${_ms_line%$'\r'}"
+        if (( _ms_first )); then
+            _ms_line="${_ms_line#$'\xef\xbb\xbf'}"
+            _ms_first=0
+        fi
+        meet_trim_var _ms_line
+        [[ -z "$_ms_line" || "$_ms_line" == '#'* ]] && continue
+        if [[ "$_ms_line" =~ $_ms_header ]]; then
+            _ms_section="${BASH_REMATCH[1]}"
+            meet_trim_var _ms_section
+            _ms_section="${_ms_section,,}"
+            continue
+        fi
+        [ -n "$_ms_section" ] && MEET_SETTINGS[$_ms_section]+="$_ms_line"$'\n'
+    done < "$MEET_SETTINGS_FILE"
+    return 0
 }
 
-# Le voci di una sezione del file di settings, una per riga, senza spazi ai lati, senza righe vuote e
-# commenti. Le righe prima della prima sezione e quelle di una sezione sconosciuta non contano; due
-# sezioni con lo stesso nome si sommano. Un file assente non da' niente.
-meet_settings_lines() {
-    local file="$1" section="$2"
-    [ -f "$file" ] || return 0
-    LC_ALL=C awk -v wanted="$section" '
-        {
-            line = $0
-            sub(/\r$/, "", line)
-            if (NR == 1) sub(/^\xef\xbb\xbf/, "", line)
-            sub(/^[ \t]+/, "", line)
-            sub(/[ \t]+$/, "", line)
-        }
-        line == "" || line ~ /^#/ { next }
-        line ~ /^\[[^]]+\]$/ {
-            name = substr(line, 2, length(line) - 2)
-            gsub(/^[ \t]+|[ \t]+$/, "", name)
-            current = tolower(name)
-            next
-        }
-        current == wanted { print line }' "$file"
+# Le voci di una sezione caricata, nell'array nominato.
+meet_settings_lines_into() {
+    local -n _ms_lines="$2"
+    local _ms_joined="${MEET_SETTINGS[$1]:-}"
+    _ms_lines=()
+    [ -n "$_ms_joined" ] && mapfile -t _ms_lines <<< "${_ms_joined%$'\n'}"
+    return 0
 }
 
-# Il valore della prima voce `chiave: valore` di una sezione, senza spazi ai lati; vuoto se la voce c'e'
-# senza valore. Ritorna 1 se la chiave non c'e'.
-meet_settings_value() {
-    local file="$1" section="$2" wanted="$3" line key value
-    while IFS= read -r line; do
-        case "$line" in *:*) ;; *) continue ;; esac
-        key="${line%%:*}"
-        meet_trim_var key
-        [ "${key,,}" = "$wanted" ] || continue
-        value="${line#*:}"
-        meet_trim_var value
-        printf '%s\n' "$value"
+# Il valore della prima voce `chiave: valore` di una sezione caricata, senza spazi ai lati, nella
+# variabile nominata; vuoto se la voce c'e' senza valore. Ritorna 1 se la chiave non c'e'.
+meet_settings_value_into() {
+    local _ms_wanted="$2" _ms_entry _ms_key
+    local -n _ms_value="$3"
+    _ms_value=""
+    while IFS= read -r _ms_entry; do
+        [[ "$_ms_entry" == *:* ]] || continue
+        _ms_key="${_ms_entry%%:*}"
+        meet_trim_var _ms_key
+        [ "${_ms_key,,}" = "$_ms_wanted" ] || continue
+        _ms_value="${_ms_entry#*:}"
+        meet_trim_var _ms_value
         return 0
-    done < <(meet_settings_lines "$file" "$section")
+    done <<< "${MEET_SETTINGS[$1]:-}"
     return 1
+}
+
+# Le voci di una sezione caricata unite da un separatore, nella variabile nominata; il testo dato se
+# la sezione e' vuota.
+meet_settings_join_into() {
+    local _ms_separator="$2" _ms_empty="$3" _ms_entry _ms_joined=""
+    local -n _ms_text="$4"
+    local -a _ms_entries
+    meet_settings_lines_into "$1" _ms_entries
+    for _ms_entry in "${_ms_entries[@]}"; do
+        _ms_joined+="${_ms_joined:+$_ms_separator}$_ms_entry"
+    done
+    _ms_text="${_ms_joined:-$_ms_empty}"
 }
 
 # La cartella dei meet: la chiave `cartella` di config.properties. Senza file o senza chiave vale il
 # default del registratore, %USERPROFILE%\meet-teams.
 meet_default_dir() {
     local configured
-    configured="$(meet_recorder_config_value cartella)" || configured=""
+    meet_recorder_config_get cartella configured || configured=""
     if [ -n "$configured" ]; then
         meet_unix_path "$configured"
     else
