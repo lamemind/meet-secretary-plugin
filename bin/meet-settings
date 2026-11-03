@@ -1,0 +1,330 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+plugin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$plugin_dir/lib/meet-common.sh"
+
+usage() {
+    cat <<'USAGE'
+meet-settings — il file di settings del segretario per il progetto, .meet-secretary/settings.ini nella
+cartella del progetto: temi, parole chiave, glossario, nome del segretario, tempi del follower. La
+pulizia lo rilegge ogni 10 s, quindi un cambio entra anche nel meet in corso.
+
+  meet-settings [--progetto DIR] [--add T]... [--remove T]... [--add-word W]... [--remove-word W]...
+                [--add-glossary G]... [--remove-glossary G]... [--voce NOME]
+      --progetto DIR       la cartella del progetto; senza, la cartella corrente
+      --add T              aggiunge un tema: `nome` o `nome: keyword, keyword` (nome in minuscolo,
+                           lettere, cifre e trattini). Ogni tema del file e' attivo: un tratto di
+                           lavoro col tema da' un evento tema. Un tema che c'e' gia' si riscrive
+      --remove T           toglie un tema
+      --add-word W         aggiunge una parola chiave: una riga del meet che la contiene da' un evento
+                           parola
+      --remove-word W      toglie una parola chiave
+      --add-glossary G     aggiunge una riga di glossario, per esempio `iuat → UAT`
+      --remove-glossary G  toglie una riga di glossario, scritta uguale
+      --voce NOME          il nome dell'utente come lo scrive Teams nei sottotitoli, per esempio
+                           `ROSSI Mario`; vuoto lo toglie. Sta in %LOCALAPPDATA%\meet-recorder\
+                           config.properties, chiave voce, perche' e' della persona e vale in ogni
+                           progetto: senza voce il nome del segretario non sveglia nessuno
+
+Stampa sempre i valori. Se il file manca lo crea, con temi, parole e glossario vuoti e il segretario di
+default, e lo mette in .git/info/exclude del progetto: il file e' personale e resta fuori da git, senza
+toccare il .gitignore del team.
+
+Temi e glossario cambiano il system prompt della pulizia, che al chunk dopo riavvia claude: una decina
+di secondi e qualche centesimo. Parole chiave, voce e nome valgono subito, senza riavvio. timeout e
+batch della sezione [segui] si cambiano a mano nel file, e meet-follow li legge quando parte.
+USAGE
+}
+
+# Il file nuovo: sezioni vuote, il segretario di default, nessun timeout.
+settings_template() {
+    cat <<'TEMPLATE'
+# meet-secretary: le impostazioni del segretario per questo progetto. Una voce per riga, # per i
+# commenti. La pulizia rilegge il file ogni 10 s. Il file e' personale e resta fuori da git
+# (.git/info/exclude). La tua voce, il nome come lo scrive Teams nei sottotitoli, sta invece in
+# %LOCALAPPDATA%\meet-recorder\config.properties, chiave voce, perche' vale in ogni progetto.
+
+[temi]
+# Un tema per riga, `nome` oppure `nome: keyword, keyword`, nome in minuscolo, lettere, cifre e
+# trattini. Ogni tema e' attivo: un tratto di lavoro col tema sveglia il segretario.
+
+[parole]
+# Una parola chiave per riga: una riga del meet che la contiene sveglia il segretario.
+
+[glossario]
+# Una voce per riga, i termini del progetto come vanno scritti, per esempio `iuat → UAT`.
+
+[segretario]
+# nome: regex Java, senza distinzione fra maiuscole e minuscole, col nome del segretario e le sue
+# storpiature. Sveglia il segretario quando lo dici tu, sulle righe della tua voce.
+nome: (?<![\p{L}])(anacleto)(?![\p{L}])
+# segretario: il nome del segretario come lo dici tu.
+segretario: Anacleto
+
+[segui]
+# timeout: in secondi; vuoto, nessun timeout.
+timeout:
+# batch: gli eventi tema e parola escono al piu' una volta ogni tanti secondi.
+batch: 60
+TEMPLATE
+}
+
+need_value() {
+    [ $# -ge 2 ] || meet_die "valore mancante per $1"
+}
+
+project_dir=""
+add_themes=()
+remove_themes=()
+add_words=()
+remove_words=()
+add_glossary=()
+remove_glossary=()
+set_voice=0
+voice=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --progetto)        need_value "$@"; project_dir="$2";       shift 2 ;;
+        --add)             need_value "$@"; add_themes+=("$2");     shift 2 ;;
+        --remove)          need_value "$@"; remove_themes+=("$2");  shift 2 ;;
+        --add-word)        need_value "$@"; add_words+=("$2");      shift 2 ;;
+        --remove-word)     need_value "$@"; remove_words+=("$2");   shift 2 ;;
+        --add-glossary)    need_value "$@"; add_glossary+=("$2");   shift 2 ;;
+        --remove-glossary) need_value "$@"; remove_glossary+=("$2"); shift 2 ;;
+        --voce)            need_value "$@"; set_voice=1; voice="$2"; shift 2 ;;
+        -h|--help)         usage; exit 0 ;;
+        *)                 meet_die "opzione non riconosciuta: $1" ;;
+    esac
+done
+
+project_dir="$(meet_unix_path "${project_dir:-$PWD}")"
+[ -d "$project_dir" ] || meet_die "cartella del progetto assente: $project_dir"
+settings_file="$(meet_settings_file "$project_dir")"
+
+# Il file e' personale: va nell'ignore locale del repo del progetto, .git/info/exclude, che non si
+# committa. Fuori da un repo git, o con il file gia' ignorato, non scrive niente.
+exclude_note=""
+settings_exclude() {
+    if ! git -C "$project_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        exclude_note="il progetto non e' un repo git"
+        return
+    fi
+    if git -C "$project_dir" ls-files --error-unmatch -- "$settings_file" >/dev/null 2>&1; then
+        exclude_note="ATTENZIONE: il file e' gia' in git, l'exclude non lo toglie"
+        return
+    fi
+    if git -C "$project_dir" check-ignore -q -- "$settings_file" 2>/dev/null; then
+        exclude_note="gia' ignorato da git"
+        return
+    fi
+    local exclude_file
+    exclude_file="$(git -C "$project_dir" rev-parse --path-format=absolute --git-path info/exclude 2>/dev/null)"
+    [ -n "$exclude_file" ] || { exclude_note="ATTENZIONE: .git/info/exclude non trovato"; return; }
+    exclude_file="$(meet_unix_path "$exclude_file")"
+    mkdir -p "${exclude_file%/*}" || { exclude_note="ATTENZIONE: .git/info non scrivibile"; return; }
+    if [ -s "$exclude_file" ] && [ -n "$(tail -c 1 "$exclude_file")" ]; then
+        printf '\n' >> "$exclude_file"
+    fi
+    printf '%s\n' "# meet-secretary: le impostazioni personali del segretario" ".meet-secretary/" >> "$exclude_file"
+    exclude_note="messo in $(meet_windows_path "$exclude_file")"
+}
+
+created=0
+settings_ensure() {
+    [ -f "$settings_file" ] && return
+    mkdir -p "${settings_file%/*}" || meet_die "cartella non scrivibile: ${settings_file%/*}"
+    meet_write_atomic "$settings_file" "$(settings_template)"$'\n' || meet_die "file non scrivibile: $settings_file"
+    created=1
+    settings_exclude
+}
+
+# Riscrive le voci di una sezione e lascia il resto del file com'e': commenti, righe vuote, altre
+# sezioni. Le voci nuove stanno dove stava la prima voce vecchia, o in fondo alla sezione; una sezione
+# che manca si aggiunge in fondo al file.
+settings_replace_section() {
+    local section="$1" lines="$2" content
+    content="$(MEET_SECTION_LINES="$lines" LC_ALL=C awk -v wanted="$section" '
+        BEGIN {
+            count = ENVIRON["MEET_SECTION_LINES"] == "" ? 0 : split(ENVIRON["MEET_SECTION_LINES"], fresh, "\n")
+        }
+        function write_fresh(    i) {
+            if (written) return
+            for (i = 1; i <= count; i++) print fresh[i]
+            written = 1
+        }
+        function write_blanks() {
+            for (; blanks > 0; blanks--) print ""
+        }
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            if (NR == 1) sub(/^\xef\xbb\xbf/, "", line)
+            trimmed = line
+            sub(/^[ \t]+/, "", trimmed)
+            sub(/[ \t]+$/, "", trimmed)
+        }
+        trimmed ~ /^\[[^]]+\]$/ {
+            if (inside) write_fresh()
+            write_blanks()
+            name = substr(trimmed, 2, length(trimmed) - 2)
+            gsub(/^[ \t]+|[ \t]+$/, "", name)
+            inside = tolower(name) == wanted
+            if (inside) found = 1
+            print line
+            next
+        }
+        inside && trimmed == "" { blanks++; next }
+        inside && trimmed ~ /^#/ { write_blanks(); print line; next }
+        inside { write_blanks(); write_fresh(); next }
+        { print line }
+        END {
+            if (inside) write_fresh()
+            write_blanks()
+            if (!found) {
+                print ""
+                print "[" wanted "]"
+                write_fresh()
+            }
+        }' "$settings_file")" || meet_die "file di settings illeggibile: $settings_file"
+    meet_write_atomic "$settings_file" "$content"$'\n' || meet_die "file non scrivibile: $settings_file"
+}
+
+theme_name() {
+    local line="${1%%:*}"
+    meet_trim_var line
+    printf '%s' "${line,,}"
+}
+
+# La voce sta in config.properties: si riscrive la sua riga, o si aggiunge, e le altre chiavi restano.
+recorder_set_voice() {
+    local value="$1" config_file input content
+    meet_trim_var value
+    config_file="$(meet_recorder_config_file)"
+    input="$config_file"
+    [ -f "$input" ] || input=/dev/null
+    mkdir -p "${config_file%/*}" || meet_die "cartella non scrivibile: ${config_file%/*}"
+    content="$(MEET_VOICE="$value" LC_ALL=C awk '
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            probe = line
+            if (NR == 1) sub(/^\xef\xbb\xbf/, "", probe)
+            sub(/^[ \t]+/, "", probe)
+            separator = index(probe, "=")
+            if (probe !~ /^[#!]/ && separator > 1) {
+                key = substr(probe, 1, separator - 1)
+                sub(/[ \t]+$/, "", key)
+                if (key == "voce") {
+                    if (!done && ENVIRON["MEET_VOICE"] != "") print "voce=" ENVIRON["MEET_VOICE"]
+                    done = 1
+                    next
+                }
+            }
+            print line
+        }
+        END { if (!done && ENVIRON["MEET_VOICE"] != "") print "voce=" ENVIRON["MEET_VOICE"] }' "$input")" \
+        || meet_die "config.properties illeggibile: $config_file"
+    meet_write_atomic "$config_file" "${content:+$content$'\n'}" || meet_die "file non scrivibile: $config_file"
+}
+
+join_lines() {
+    local lines
+    lines="$(paste -sd'|' - | sed 's/|/; /g')"
+    printf '%s' "${lines:-$1}"
+}
+
+settings_ensure
+changed=()
+
+if (( ${#add_themes[@]} + ${#remove_themes[@]} > 0 )); then
+    mapfile -t themes < <(meet_settings_lines "$settings_file" temi)
+    for theme in "${add_themes[@]}"; do
+        name="$(theme_name "$theme")"
+        [[ "$name" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || meet_die "nome di tema non valido: $theme (minuscole, cifre e trattini)"
+        kept=()
+        for known in "${themes[@]}"; do
+            [ "$(theme_name "$known")" = "$name" ] || kept+=("$known")
+        done
+        case "$theme" in
+            *:*) keywords="${theme#*:}"; meet_trim_var keywords; kept+=("$name${keywords:+: $keywords}") ;;
+            *)   kept+=("$name") ;;
+        esac
+        themes=("${kept[@]}")
+    done
+    for theme in "${remove_themes[@]}"; do
+        name="$(theme_name "$theme")"
+        kept=()
+        for known in "${themes[@]}"; do
+            [ "$(theme_name "$known")" = "$name" ] || kept+=("$known")
+        done
+        themes=("${kept[@]}")
+    done
+    settings_replace_section temi "$(printf '%s\n' "${themes[@]}")"
+    changed+=("temi")
+fi
+
+# Parole e glossario: una voce che c'e' gia', a meno delle maiuscole, si riscrive invece di ripetersi.
+update_list() {
+    local section="$1" label="$2" adds_name="$3" removes_name="$4" entry known kept
+    local -n adds="$adds_name" removes="$removes_name"
+    (( ${#adds[@]} + ${#removes[@]} > 0 )) || return 0
+    mapfile -t entries < <(meet_settings_lines "$settings_file" "$section")
+    for entry in "${adds[@]}"; do
+        meet_trim_var entry
+        [ -n "$entry" ] || meet_die "$label vuota"
+        kept=()
+        for known in "${entries[@]}"; do
+            [ "${known,,}" = "${entry,,}" ] || kept+=("$known")
+        done
+        kept+=("$entry")
+        entries=("${kept[@]}")
+    done
+    for entry in "${removes[@]}"; do
+        meet_trim_var entry
+        kept=()
+        for known in "${entries[@]}"; do
+            [ "${known,,}" = "${entry,,}" ] || kept+=("$known")
+        done
+        entries=("${kept[@]}")
+    done
+    settings_replace_section "$section" "$(printf '%s\n' "${entries[@]}")"
+    changed+=("$section")
+}
+update_list parole "parola chiave" add_words remove_words
+update_list glossario "riga di glossario" add_glossary remove_glossary
+
+if (( set_voice )); then
+    recorder_set_voice "$voice"
+    changed+=("voce")
+fi
+
+# I valori, come li legge la pulizia.
+seconds_or_note() {
+    local value="$1" default_text="$2" invalid_text="$3"
+    if [ -z "$value" ]; then
+        printf '%s' "$default_text"
+    elif [[ "$value" =~ ^[0-9]+$ ]]; then
+        printf '%s s' "$value"
+    else
+        printf '%s (non valido: %s)' "$value" "$invalid_text"
+    fi
+}
+
+secretary_name="$(meet_settings_value "$settings_file" segretario segretario)" || secretary_name=""
+name_regex="$(meet_settings_value "$settings_file" segretario nome)" || name_regex=""
+user_voice="$(meet_recorder_config_value voce)" || user_voice=""
+timeout_value="$(meet_settings_value "$settings_file" segui timeout)" || timeout_value=""
+batch_value="$(meet_settings_value "$settings_file" segui batch)" || batch_value=""
+
+header="impostazioni: $(meet_windows_path "$settings_file")"
+(( created )) && header+=" (creato ora${exclude_note:+; $exclude_note})"
+(( ${#changed[@]} > 0 )) && header+=", aggiornati: $(IFS=,; printf '%s' "${changed[*]}" | sed 's/,/, /g')"
+echo "$header"
+echo "temi: $(meet_settings_lines "$settings_file" temi | join_lines nessuno)"
+echo "parole chiave: $(meet_settings_lines "$settings_file" parole | join_lines nessuna)"
+echo "glossario: $(meet_settings_lines "$settings_file" glossario | join_lines vuoto)"
+echo "segretario: ${secretary_name:-senza nome}, nome ${name_regex:-assente: il nome non sveglia nessuno}"
+echo "voce: ${user_voice:-non configurata: il nome del segretario non sveglia nessuno} ($(meet_windows_path "$(meet_recorder_config_file)"))"
+echo "segui: timeout $(seconds_or_note "$timeout_value" nessuno "nessun timeout"), batch $(seconds_or_note "$batch_value" "$MEET_DEFAULT_BATCH_SECONDS s" "meet-follow usa $MEET_DEFAULT_BATCH_SECONDS s")"

@@ -1,9 +1,9 @@
 # meet-common.sh — funzioni comuni agli script del segretario (meet-clean, meet-follow, meet-catchup,
-# meet-temi). Si carica con `source`; non stampa niente e non esce da sola, tranne meet_die.
+# meet-settings). Si carica con `source`; non stampa niente e non esce da sola, tranne meet_die.
 #
 # Un meet e' il file <stamp>.tsv scritto da meet-recorder nella cartella dei meet, col diario
 # <stamp>.diag.tsv accanto. Lo stamp e' il nome del file senza .tsv, senza punti: tutti i file derivati
-# (.rif.tsv, .eventi.tsv, .temi, ...) cominciano con lo stamp seguito da un punto.
+# (.rif.tsv, .eventi.tsv, .segnalibro-segui, ...) cominciano con lo stamp seguito da un punto.
 
 MEET_DIARY_ALIVE_SECONDS=120
 
@@ -30,30 +30,104 @@ meet_windows_path() {
     fi
 }
 
-# La cartella dei meet: la chiave `cartella` di %LOCALAPPDATA%\meet-recorder\config.properties, il
-# file che scrive meet-recorder. Una riga per chiave, chiave=valore, senza escape: i backslash dei path
-# restano come sono. Senza file o senza chiave vale il default del registratore, %USERPROFILE%\meet-teams.
-meet_default_dir() {
+# Toglie gli spazi ai lati del valore della variabile nominata, senza subshell: su Git Bash ogni $(...)
+# e' un fork da decine di millisecondi.
+meet_trim_var() {
+    local -n meet_trimmed="$1"
+    meet_trimmed="${meet_trimmed#"${meet_trimmed%%[![:space:]]*}"}"
+    meet_trimmed="${meet_trimmed%"${meet_trimmed##*[![:space:]]}"}"
+}
+
+# %LOCALAPPDATA%\meet-recorder\config.properties: il file della persona sulla macchina, che scrive
+# meet-recorder. Chiavi: `cartella`, la cartella dei meet, e `voce`, il nome dell'utente come lo scrive
+# Teams nei sottotitoli.
+meet_recorder_config_file() {
     local local_app_data="${LOCALAPPDATA:-${USERPROFILE:-$HOME}/AppData/Local}"
-    local config_file
-    config_file="$(meet_unix_path "$local_app_data")/meet-recorder/config.properties"
-    local configured=""
-    if [ -f "$config_file" ]; then
-        local line key value
-        while IFS= read -r line || [ -n "$line" ]; do
-            line="${line%$'\r'}"
-            line="${line#$'\xef\xbb\xbf'}"
-            case "$line" in ''|'#'*|'!'*) continue ;; esac
-            key="${line%%=*}"
-            [ "$key" = "$line" ] && continue
-            value="${line#*=}"
-            key="${key//[[:space:]]/}"
-            [ "$key" = "cartella" ] || continue
-            value="${value#"${value%%[![:space:]]*}"}"
-            value="${value%"${value##*[![:space:]]}"}"
-            configured="$value"
-        done < "$config_file"
-    fi
+    printf '%s/meet-recorder/config.properties\n' "$(meet_unix_path "$local_app_data")"
+}
+
+# Il valore di una chiave di config.properties: una riga per chiave, chiave=valore, senza escape, i
+# backslash dei path restano come sono. Con la chiave ripetuta vale l'ultima, come per il registratore.
+# Ritorna 1 se la chiave non c'e'.
+meet_recorder_config_value() {
+    local wanted="$1" config_file line key value found=1 configured=""
+    config_file="$(meet_recorder_config_file)"
+    [ -f "$config_file" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        line="${line#$'\xef\xbb\xbf'}"
+        meet_trim_var line
+        case "$line" in ''|'#'*|'!'*) continue ;; esac
+        key="${line%%=*}"
+        [ "$key" = "$line" ] && continue
+        value="${line#*=}"
+        meet_trim_var key
+        [ "$key" = "$wanted" ] || continue
+        meet_trim_var value
+        configured="$value"
+        found=0
+    done < "$config_file"
+    printf '%s\n' "$configured"
+    return $found
+}
+
+# Il file di settings del segretario per un progetto: .meet-secretary/settings.ini nella cartella del
+# progetto, la cartella corrente se non e' data. Sezioni [temi], [parole], [glossario], [segretario],
+# [segui], una voce per riga, # per i commenti; lo legge anche la pulizia (ProjectSettings.java).
+MEET_SETTINGS_RELATIVE=".meet-secretary/settings.ini"
+MEET_DEFAULT_BATCH_SECONDS=60
+meet_settings_file() {
+    local project_dir="${1:-$PWD}"
+    project_dir="$(meet_unix_path "$project_dir")"
+    printf '%s/%s\n' "${project_dir%/}" "$MEET_SETTINGS_RELATIVE"
+}
+
+# Le voci di una sezione del file di settings, una per riga, senza spazi ai lati, senza righe vuote e
+# commenti. Le righe prima della prima sezione e quelle di una sezione sconosciuta non contano; due
+# sezioni con lo stesso nome si sommano. Un file assente non da' niente.
+meet_settings_lines() {
+    local file="$1" section="$2"
+    [ -f "$file" ] || return 0
+    LC_ALL=C awk -v wanted="$section" '
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            if (NR == 1) sub(/^\xef\xbb\xbf/, "", line)
+            sub(/^[ \t]+/, "", line)
+            sub(/[ \t]+$/, "", line)
+        }
+        line == "" || line ~ /^#/ { next }
+        line ~ /^\[[^]]+\]$/ {
+            name = substr(line, 2, length(line) - 2)
+            gsub(/^[ \t]+|[ \t]+$/, "", name)
+            current = tolower(name)
+            next
+        }
+        current == wanted { print line }' "$file"
+}
+
+# Il valore della prima voce `chiave: valore` di una sezione, senza spazi ai lati; vuoto se la voce c'e'
+# senza valore. Ritorna 1 se la chiave non c'e'.
+meet_settings_value() {
+    local file="$1" section="$2" wanted="$3" line key value
+    while IFS= read -r line; do
+        case "$line" in *:*) ;; *) continue ;; esac
+        key="${line%%:*}"
+        meet_trim_var key
+        [ "${key,,}" = "$wanted" ] || continue
+        value="${line#*:}"
+        meet_trim_var value
+        printf '%s\n' "$value"
+        return 0
+    done < <(meet_settings_lines "$file" "$section")
+    return 1
+}
+
+# La cartella dei meet: la chiave `cartella` di config.properties. Senza file o senza chiave vale il
+# default del registratore, %USERPROFILE%\meet-teams.
+meet_default_dir() {
+    local configured
+    configured="$(meet_recorder_config_value cartella)" || configured=""
     if [ -n "$configured" ]; then
         meet_unix_path "$configured"
     else

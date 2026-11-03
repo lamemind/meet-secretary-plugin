@@ -17,16 +17,20 @@ meet-catchup — quello che il segretario non ha ancora letto di un meet, dai fi
   meet-catchup --index [--meet S]     le fasce dell'indice, l'argomento in corso, il segnalibro
   meet-catchup --clean A-B [--meet S] i tratti puliti che toccano le righe A-B, fuffa compresa
   meet-catchup --raw A-B [--meet S]   le righe A-B del meet, testo grezzo dei sottotitoli
-  meet-catchup --status [--meet S]    stato di registratore, pulizia, eventi, temi e segnalibri
+  meet-catchup --status [--meet S]    stato di registratore, pulizia, eventi e segnalibri, poi i
+                                      valori del file di settings: segretario, temi, parole chiave
 
-  --meet S  stamp o .tsv del meet; senza, il meet in corso nella cartella dei meet
-  --dir D   cartella dei meet, default quella di meet-recorder (config.properties)
+  --meet S      stamp o .tsv del meet; senza, il meet in corso nella cartella dei meet
+  --dir D       cartella dei meet, default quella di meet-recorder (config.properties)
+  --progetto P  cartella del progetto, col file di settings .meet-secretary/settings.ini; default la
+                cartella corrente
 Nessun modo tranne il default sposta il segnalibro.
 USAGE
 }
 
 requested_meet=""
 meet_dir=""
+project_dir=""
 mode="catchup"
 mode_range=""
 peek=0
@@ -37,6 +41,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --meet)    requested_meet="$2"; shift 2 ;;
         --dir)     meet_dir="$2";       shift 2 ;;
+        --progetto) project_dir="$2";   shift 2 ;;
         --peek)    peek=1;              shift ;;
         --fuffa)   with_fuffa=1;        shift ;;
         --max-raw) max_raw="$2";        shift 2 ;;
@@ -191,12 +196,17 @@ case "$mode" in
         else
             echo "eventi: nessuno"
         fi
-        secretary_config="$plugin_dir/pulizia/segretario.txt"
-        secretary_name="$(grep -m1 '^segretario:' "$secretary_config" 2>/dev/null | cut -d: -f2- | tr -d '\r' | sed 's/^[[:space:]]*//')"
-        user_voice="$(grep -m1 '^voce:' "$secretary_config" 2>/dev/null | cut -d: -f2- | tr -d '\r' | sed 's/^[[:space:]]*//')"
+        settings_file="$(meet_settings_file "${project_dir:-$PWD}")"
+        if [ -f "$settings_file" ]; then
+            echo "impostazioni: $(meet_windows_path "$settings_file")"
+        else
+            echo "impostazioni: assenti ($(meet_windows_path "$settings_file")), le crea meet-settings"
+        fi
+        secretary_name="$(meet_settings_value "$settings_file" segretario segretario)" || secretary_name=""
+        user_voice="$(meet_recorder_config_value voce)" || user_voice=""
         echo "segretario: ${secretary_name:-senza nome}, chiamato dalla voce ${user_voice:-non configurata}; letto fino al tratto $secretary_segments di $segments_total"
-        themes="$(grep -v '^[[:space:]]*\(#\|$\)' "$MEET_BASE.temi" 2>/dev/null | tr -d '\r' | sed 's/:.*//' | paste -sd, - | sed 's/,/, /g')"
-        words="$(grep -v '^[[:space:]]*\(#\|$\)' "$MEET_BASE.parole" 2>/dev/null | tr -d '\r' | paste -sd, - | sed 's/,/, /g')"
+        themes="$(meet_settings_lines "$settings_file" temi | sed 's/[[:space:]]*:.*//' | tr '[:upper:]' '[:lower:]' | paste -sd'|' - | sed 's/|/, /g')"
+        words="$(meet_settings_lines "$settings_file" parole | paste -sd'|' - | sed 's/|/, /g')"
         echo "temi attivi: ${themes:-nessuno}"
         echo "parole chiave: ${words:-nessuna}"
         exit 0 ;;

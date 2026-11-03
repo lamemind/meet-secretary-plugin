@@ -15,16 +15,19 @@ meet-follow — segue gli eventi di un meet scritti dallo script di pulizia (<st
 stampa una riga per evento. Pensato come comando del tool Monitor di Claude Code: ogni riga su stdout
 e' una notifica, cioe' un turno del segretario.
 
-  meet-follow [--meet S] [--dir D] [--from-line N] [--min-gap-seconds G] [--batch-seconds B]
+  meet-follow [--meet S] [--dir D] [--progetto P] [--from-line N] [--min-gap-seconds G] [--batch-seconds B]
       --meet S             stamp o .tsv del meet; senza, il meet in corso nella cartella dei meet
       --dir D              cartella dei meet, default quella di meet-recorder (config.properties)
+      --progetto P         cartella del progetto, col file di settings .meet-secretary/settings.ini;
+                           default la cartella corrente
       --from-line N        primo evento da stampare, 1-based; senza, quello dopo l'ultimo gia'
                            stampato, salvato in <stamp>.segnalibro-segui: un riarmo non ripete niente
       --min-gap-seconds G  fra due stampe passano almeno G secondi, default 3, perche' Monitor scarta
                            le notifiche troppo fitte
-      --batch-seconds B    gli eventi tema e parola escono al piu' una volta ogni B secondi, default
-                           60, raccolti per tema e per parola; nome e fine escono subito e si portano
-                           dietro quelli in attesa
+      --batch-seconds B    gli eventi tema e parola escono al piu' una volta ogni B secondi, raccolti
+                           per tema e per parola; nome e fine escono subito e si portano dietro quelli
+                           in attesa. Default la chiave batch della sezione [segui] del file di
+                           settings, letta all'avvio, o 60
 
 Righe stampate:
   #<n> <ora> nome: <voce> chiama il segretario, righe a-b
@@ -58,14 +61,16 @@ exit_if_launcher_gone() {
 
 requested_meet=""
 meet_dir=""
+project_dir=""
 from_line=""
 min_gap_seconds=3
-batch_seconds=60
+batch_seconds=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --meet)            requested_meet="$2";  shift 2 ;;
         --dir)             meet_dir="$2";        shift 2 ;;
+        --progetto)        project_dir="$2";     shift 2 ;;
         --from-line)       from_line="$2";       shift 2 ;;
         --min-gap-seconds) min_gap_seconds="$2"; shift 2 ;;
         --batch-seconds)   batch_seconds="$2";   shift 2 ;;
@@ -75,7 +80,19 @@ while [ $# -gt 0 ]; do
 done
 
 [[ "$min_gap_seconds" =~ ^[0-9]+$ ]] || meet_die "--min-gap-seconds vuole un intero di secondi: $min_gap_seconds"
-[[ "$batch_seconds" =~ ^[0-9]+$ ]] || meet_die "--batch-seconds vuole un intero di secondi: $batch_seconds"
+if [ -n "$batch_seconds" ]; then
+    [[ "$batch_seconds" =~ ^[0-9]+$ ]] || meet_die "--batch-seconds vuole un intero di secondi: $batch_seconds"
+else
+    # Dal file di settings, all'avvio: un cambio vale dal riarmo dopo. Un valore non valido non ferma il
+    # follower, che resterebbe muto per tutto il meet: vale il default, con un avviso su stderr.
+    settings_file="$(meet_settings_file "${project_dir:-$PWD}")"
+    batch_seconds="$(meet_settings_value "$settings_file" segui batch)" || batch_seconds=""
+    if [ -n "$batch_seconds" ] && ! [[ "$batch_seconds" =~ ^[0-9]+$ ]]; then
+        echo "meet-follow: batch non valido nel file di settings ($batch_seconds): uso $MEET_DEFAULT_BATCH_SECONDS s" >&2
+        batch_seconds=""
+    fi
+    batch_seconds="${batch_seconds:-$MEET_DEFAULT_BATCH_SECONDS}"
+fi
 meet_resolve "$requested_meet" "$meet_dir" || meet_die "$MEET_ERROR"
 
 events_file="$MEET_BASE.eventi.tsv"
@@ -296,7 +313,7 @@ exec 4< <(exec tail -n 0 -F -s "$TAIL_SLEEP_SECONDS" "$MEET_DIARY" 2>/dev/null)
 diary_tail_pid=$!
 
 # Su stderr: ogni riga su stdout e' un turno del segretario, e questa non chiede niente.
-echo "meet-follow: segue gli eventi di $MEET_STAMP dall'evento $from_line" >&2
+echo "meet-follow: segue gli eventi di $MEET_STAMP dall'evento $from_line, batch $batch_seconds s" >&2
 
 while true; do
     read_event_line
