@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+plugin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$plugin_dir/lib/meet-common.sh"
+
+usage() {
+    cat <<'USAGE'
+meet-catchup — quello che il segretario non ha ancora letto di un meet, dai file della pulizia.
+
+  meet-catchup [--meet S] [--dir D] [--peek] [--fuffa] [--max-raw N]
+      i tratti puliti di <stamp>.rif.tsv dopo il segnalibro del segretario
+      (<stamp>.segnalibro-segretario), raggruppati per argomento, poi le righe del meet che la
+      pulizia non ha ancora chiuso (al piu' le ultime N, default 30); sposta il segnalibro alla fine.
+      --peek   non sposta il segnalibro
+      --fuffa  stampa anche i tratti di fuffa, che di norma si contano soltanto
+  meet-catchup --index [--meet S]     le fasce dell'indice, l'argomento in corso, il segnalibro
+  meet-catchup --clean A-B [--meet S] i tratti puliti che toccano le righe A-B, fuffa compresa
+  meet-catchup --raw A-B [--meet S]   le righe A-B del meet, testo grezzo dei sottotitoli
+  meet-catchup --status [--meet S]    stato di registratore, pulizia, eventi, temi e segnalibri
+
+  --meet S  stamp o .tsv del meet; senza, il meet in corso nella cartella dei meet
+  --dir D   cartella dei meet, default quella di meet-recorder (config.properties)
+Nessun modo tranne il default sposta il segnalibro.
+USAGE
+}
+
+requested_meet=""
+meet_dir=""
+mode="catchup"
+mode_range=""
+peek=0
+with_fuffa=0
+max_raw=30
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --meet)    requested_meet="$2"; shift 2 ;;
+        --dir)     meet_dir="$2";       shift 2 ;;
+        --peek)    peek=1;              shift ;;
+        --fuffa)   with_fuffa=1;        shift ;;
+        --max-raw) max_raw="$2";        shift 2 ;;
+        --index)   mode="index";        shift ;;
+        --status)  mode="status";       shift ;;
+        --clean)   mode="clean"; mode_range="${2:-}"; shift 2 ;;
+        --raw)     mode="raw";   mode_range="${2:-}"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *)         meet_die "opzione non riconosciuta: $1" ;;
+    esac
+done
+
+[[ "$max_raw" =~ ^[0-9]+$ ]] || meet_die "--max-raw vuole un intero: $max_raw"
+meet_resolve "$requested_meet" "$meet_dir" || meet_die "$MEET_ERROR"
+
+segments_file="$MEET_BASE.rif.tsv"
+index_file="$MEET_BASE.indice.tsv"
+events_file="$MEET_BASE.eventi.tsv"
+cleaner_bookmark_file="$MEET_BASE.segnalibro-pulizia"
+secretary_bookmark_file="$MEET_BASE.segnalibro-segretario"
+follower_bookmark_file="$MEET_BASE.segnalibro-segui"
+
+raw_total="$(meet_complete_lines "$MEET_FILE")"
+segments_total="$(meet_complete_lines "$segments_file")"
+cleaned_through="$(meet_bookmark_value "$cleaner_bookmark_file" pulizia 0)"
+[[ "$cleaned_through" =~ ^[0-9]+$ ]] || cleaned_through=0
+secretary_segments="$(meet_bookmark_value "$secretary_bookmark_file" tratti 0)"
+[[ "$secretary_segments" =~ ^[0-9]+$ ]] || secretary_segments=0
+(( secretary_segments > segments_total )) && secretary_segments=$segments_total
+
+parse_range() {
+    [[ "$1" =~ ^([0-9]+)(-([0-9]+))?$ ]] || meet_die "intervallo di righe non valido: $1 (atteso A-B o A)"
+    range_from="${BASH_REMATCH[1]}"
+    range_to="${BASH_REMATCH[3]:-$range_from}"
+    (( range_from <= range_to )) || meet_die "intervallo di righe rovesciato: $1"
+}
+
+recorder_state() {
+    if meet_diary_has_end "$MEET_DIARY"; then
+        local detail
+        detail="$(grep -E $'^[^\t]*\tfine(\t|$)' "$MEET_DIARY" | tail -n 1 | cut -f3 | tr -d '\r')"
+        detail="${detail%%righe=*}"; detail="${detail%"${detail##*[![:space:]]}"}"
+        printf 'concluso%s' "${detail:+ ($detail)}"
+    else
+        printf 'in corso'
+    fi
+}
+
+cleaner_state() {
+    local pid
+    pid="$(head -n 1 "$MEET_BASE.pulizia.pid" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$pid" ] && meet_windows_process_alive "$pid" "java.exe"; then
+        printf 'in corso (pid %s)' "$pid"
+    else
+        printf 'ferma'
+    fi
+}
+
+# Le righe del meet, formattate come le stampa meet-follow per le frasi: #n ora voce: testo, con la
+# riga che una revisione sostituisce.
+print_raw_lines() {
+    local from="$1" to="$2"
+    awk -F'\t' -v from="$from" -v to="$to" -v total="$raw_total" '
+        NR > total || NR > to { exit }
+        NR >= from {
+            sub(/\r$/, "")
+            line = "#" NR " " $1 " " $2 ": " $3
+            if ($4 != "") line = line " (rivede #" $4 ")"
+            print line
+        }' "$MEET_FILE"
+}
+
+# I tratti del .rif.tsv: da, a, ora, fuffa o tema, etichetta, testo, righe riviste. Un'intestazione a
+# ogni cambio di etichetta; la fuffa si conta, o si stampa con show_fuffa.
+print_segments() {
+    local first_segment="$1" last_segment="$2" line_from="$3" line_to="$4" show_fuffa="$5"
+    awk -F'\t' -v first="$first_segment" -v last="$last_segment" -v line_from="$line_from" \
+        -v line_to="$line_to" -v show_fuffa="$show_fuffa" '
+        NR > last { exit }
+        NR >= first {
+            sub(/\r$/, "")
+            if ($1 + 0 > line_to || $2 + 0 < line_from) next
+            if ($4 == "fuffa" && !show_fuffa) {
+                fuffa_segments++
+                fuffa_lines += $2 - $1 + 1
+                next
+            }
+            if ($5 != label) {
+                print "— " $5
+                label = $5
+            }
+            range = ($1 == $2) ? "r" $1 : "r" $1 "-" $2
+            line = range " " $3 " [" $4 "] " $6
+            if ($7 != "") line = line " (rivede le righe " $7 ")"
+            print line
+        }
+        END {
+            if (fuffa_segments > 0)
+                print "fuffa omessa: " fuffa_segments " tratti, " fuffa_lines " righe"
+        }' "$segments_file"
+}
+
+segment_line_span() {
+    awk -F'\t' -v first="$1" -v last="$2" '
+        NR > last { exit }
+        NR >= first { if (from == "") from = $1; to = $2 }
+        END { print (from == "" ? "" : from "-" to) }' "$segments_file"
+}
+
+case "$mode" in
+    raw)
+        parse_range "$mode_range"
+        echo "meet $MEET_STAMP: righe $range_from-$range_to di $raw_total, testo grezzo"
+        print_raw_lines "$range_from" "$range_to"
+        exit 0 ;;
+    clean)
+        parse_range "$mode_range"
+        echo "meet $MEET_STAMP: tratti puliti sulle righe $range_from-$range_to; pulite $cleaned_through righe di $raw_total"
+        [ "$segments_total" -gt 0 ] && print_segments 1 "$segments_total" "$range_from" "$range_to" 1
+        (( range_to > cleaned_through && cleaned_through < raw_total )) \
+            && echo "righe dopo la $cleaned_through non ancora pulite: meet-catchup --raw $(( cleaned_through + 1 ))-$range_to"
+        exit 0 ;;
+    index)
+        bands=0
+        [ -f "$index_file" ] && bands="$(meet_complete_lines "$index_file")"
+        echo "indice di $MEET_STAMP: $bands fasce; pulite $cleaned_through righe di $raw_total"
+        last_indexed=0
+        if (( bands > 0 )); then
+            awk -F'\t' -v total="$bands" 'NR > total { exit } {
+                sub(/\r$/, "")
+                range = ($5 == $6) ? "r" $5 : "r" $5 "-" $6
+                print $1 "-" $2 " " range " " $3 ": " $4
+            }' "$index_file"
+            last_indexed="$(awk -F'\t' -v total="$bands" 'NR <= total { last = $6 } END { print last + 0 }' "$index_file")"
+        fi
+        if (( segments_total > 0 )); then
+            awk -F'\t' -v total="$segments_total" -v after="$last_indexed" '
+                NR > total { exit }
+                $1 + 0 > after { if (from == "") { from = $1; time = $3 } to = $2; label = $5 }
+                END { if (from != "") print "in corso dalle " time ": " label ", righe " from "-" to " (fascia non ancora chiusa)" }' "$segments_file"
+        fi
+        echo "segnalibro del segretario: tratto $secretary_segments di $segments_total"
+        exit 0 ;;
+    status)
+        echo "meet $MEET_STAMP: $(meet_windows_path "$MEET_FILE")"
+        echo "registratore: $(recorder_state), $raw_total righe"
+        echo "pulizia: $(cleaner_state), pulite $cleaned_through righe, $segments_total tratti"
+        if [ -f "$events_file" ]; then
+            events_total="$(meet_complete_lines "$events_file")"
+            counts="$(cut -f2 "$events_file" | head -n "$events_total" | sort | uniq -c | awk '{ printf "%s%s %s", sep, $2, $1; sep = ", " }')"
+            echo "eventi: $events_total${counts:+ ($counts)}, seguiti fino al #$(meet_bookmark_value "$follower_bookmark_file" eventi 0)"
+        else
+            echo "eventi: nessuno"
+        fi
+        secretary_config="$plugin_dir/pulizia/segretario.txt"
+        secretary_name="$(grep -m1 '^segretario:' "$secretary_config" 2>/dev/null | cut -d: -f2- | tr -d '\r' | sed 's/^[[:space:]]*//')"
+        user_voice="$(grep -m1 '^voce:' "$secretary_config" 2>/dev/null | cut -d: -f2- | tr -d '\r' | sed 's/^[[:space:]]*//')"
+        echo "segretario: ${secretary_name:-senza nome}, chiamato dalla voce ${user_voice:-non configurata}; letto fino al tratto $secretary_segments di $segments_total"
+        themes="$(grep -v '^[[:space:]]*\(#\|$\)' "$MEET_BASE.temi" 2>/dev/null | tr -d '\r' | sed 's/:.*//' | paste -sd, - | sed 's/,/, /g')"
+        words="$(grep -v '^[[:space:]]*\(#\|$\)' "$MEET_BASE.parole" 2>/dev/null | tr -d '\r' | paste -sd, - | sed 's/,/, /g')"
+        echo "temi attivi: ${themes:-nessuno}"
+        echo "parole chiave: ${words:-nessuna}"
+        exit 0 ;;
+esac
+
+new_from=$(( secretary_segments + 1 ))
+raw_tail_from=$(( cleaned_through + 1 ))
+has_segments=0
+(( new_from <= segments_total )) && has_segments=1
+has_raw_tail=0
+(( raw_tail_from <= raw_total )) && has_raw_tail=1
+
+if (( !has_segments && !has_raw_tail )); then
+    echo "meet $MEET_STAMP: niente di nuovo; pulite $cleaned_through righe di $raw_total"
+    exit 0
+fi
+
+if (( has_segments )); then
+    span="$(segment_line_span "$new_from" "$segments_total")"
+    echo "meet $MEET_STAMP: tratti $new_from-$segments_total, righe $span; pulite $cleaned_through righe di $raw_total"
+    print_segments "$new_from" "$segments_total" 1 999999999 "$with_fuffa"
+else
+    echo "meet $MEET_STAMP: nessun tratto pulito nuovo; pulite $cleaned_through righe di $raw_total"
+fi
+
+if (( has_raw_tail )); then
+    shown_from=$raw_tail_from
+    if (( max_raw > 0 && raw_total - raw_tail_from + 1 > max_raw )); then
+        shown_from=$(( raw_total - max_raw + 1 ))
+    fi
+    echo "non ancora pulite, righe $raw_tail_from-$raw_total, testo grezzo:"
+    (( shown_from > raw_tail_from )) \
+        && echo "(righe $raw_tail_from-$(( shown_from - 1 )) omesse: meet-catchup --raw $raw_tail_from-$(( shown_from - 1 )))"
+    (( max_raw > 0 )) && print_raw_lines "$shown_from" "$raw_total"
+fi
+
+if (( has_segments && !peek )); then
+    last_line="${span#*-}"
+    meet_write_atomic "$secretary_bookmark_file" "tratti=$segments_total"$'\n'"riga=$last_line"$'\n'
+fi

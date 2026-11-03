@@ -1,0 +1,10 @@
+# Lista dei temi del riformulatore: una riga per tema, `nome: keyword, keyword`. Le righe con # non
+# entrano nel prompt. Un tratto di lavoro fuori da tutti i temi prende `altro`. I temi attivi di un
+# meet, e i temi nuovi, stanno in <stamp>.temi accanto al meet.
+sviluppo: codice, architettura, frontend, backend, griglia, componente, libreria, query dinamica, mapping, DTO, endpoint, test, refactoring
+rilascio: UAT, deploy, release, merge request, branch, pipeline, hotfix, rollback, ambiente, build, versione
+jira: Jira, ticket, story, epic, sprint, stima, priorità, backlog
+dati: Oracle, query, schema, tabella, vista, procedura, dati di test, estrazione
+infrastruttura: PC, VPN, IntelliJ, Kubernetes, pod, log, Kibana, certificati, accessi, permessi, credenziali, Keycloak
+claude: Claude, Claude Code, AI, prompt, agente, plugin, MCP, skill
+organizzazione: riunione, call, demo, scadenza, pianificazione, chi fa cosa, ferie, priorità del team

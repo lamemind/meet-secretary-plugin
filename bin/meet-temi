@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+plugin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$plugin_dir/lib/meet-common.sh"
+
+usage() {
+    cat <<'USAGE'
+meet-temi — i file di controllo di un meet che lo script di pulizia rilegge a ogni giro.
+
+  meet-temi [--meet S] [--dir D] [--add T]... [--remove T]... [--add-word W]... [--remove-word W]...
+            [--add-glossary G]...
+      --add T           attiva un tema: `nome` o `nome: keyword, keyword` (nome in minuscolo, lettere,
+                        cifre e trattini). Un tratto di lavoro con un tema attivo da' un evento tema
+      --remove T        disattiva un tema
+      --add-word W      una parola chiave: una riga del meet che la contiene da' un evento parola
+      --remove-word W   toglie una parola chiave
+      --add-glossary G  una riga di glossario del meet, per esempio `iuat → UAT`
+  Senza modifiche stampa temi attivi, parole chiave, glossario del meet e i temi del plugin.
+
+File: <stamp>.temi, <stamp>.parole, <stamp>.glossario accanto al meet. Un tema fuori dalla lista del
+plugin, le keyword in piu' e il glossario cambiano il system prompt della pulizia, che al chunk dopo
+riavvia claude; attivare un tema della lista e cambiare le parole chiave non riavviano niente.
+USAGE
+}
+
+requested_meet=""
+meet_dir=""
+add_themes=()
+remove_themes=()
+add_words=()
+remove_words=()
+add_glossary=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --meet)         requested_meet="$2";  shift 2 ;;
+        --dir)          meet_dir="$2";        shift 2 ;;
+        --add)          add_themes+=("$2");   shift 2 ;;
+        --remove)       remove_themes+=("$2"); shift 2 ;;
+        --add-word)     add_words+=("$2");    shift 2 ;;
+        --remove-word)  remove_words+=("$2"); shift 2 ;;
+        --add-glossary) add_glossary+=("$2"); shift 2 ;;
+        -h|--help)      usage; exit 0 ;;
+        *)              meet_die "opzione non riconosciuta: $1" ;;
+    esac
+done
+
+meet_resolve "$requested_meet" "$meet_dir" || meet_die "$MEET_ERROR"
+themes_file="$MEET_BASE.temi"
+words_file="$MEET_BASE.parole"
+glossary_file="$MEET_BASE.glossario"
+
+# Le righe utili di un file di controllo, senza vuote e commenti, come le legge la pulizia.
+control_lines() {
+    [ -f "$1" ] || return 0
+    tr -d '\r' < "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^\(#\|$\)'
+}
+
+theme_name() {
+    local line="$1"
+    line="${line%%:*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    printf '%s' "${line,,}"
+}
+
+changed=0
+
+if (( ${#add_themes[@]} + ${#remove_themes[@]} > 0 )); then
+    mapfile -t themes < <(control_lines "$themes_file")
+    for theme in "${add_themes[@]}"; do
+        name="$(theme_name "$theme")"
+        [[ "$name" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || meet_die "nome di tema non valido: $theme (minuscole, cifre e trattini)"
+        kept=()
+        for known in "${themes[@]}"; do
+            [ "$(theme_name "$known")" = "$name" ] || kept+=("$known")
+        done
+        case "$theme" in
+            *:*) kept+=("$name:${theme#*:}") ;;
+            *)   kept+=("$name") ;;
+        esac
+        themes=("${kept[@]}")
+    done
+    for theme in "${remove_themes[@]}"; do
+        name="$(theme_name "$theme")"
+        kept=()
+        for known in "${themes[@]}"; do
+            [ "$(theme_name "$known")" = "$name" ] || kept+=("$known")
+        done
+        themes=("${kept[@]}")
+    done
+    content=""
+    for theme in "${themes[@]}"; do content+="$theme"$'\n'; done
+    meet_write_atomic "$themes_file" "$content"
+    changed=1
+fi
+
+if (( ${#add_words[@]} + ${#remove_words[@]} > 0 )); then
+    mapfile -t words < <(control_lines "$words_file")
+    for word in "${add_words[@]}"; do
+        kept=()
+        for known in "${words[@]}"; do
+            [ "${known,,}" = "${word,,}" ] || kept+=("$known")
+        done
+        kept+=("$word")
+        words=("${kept[@]}")
+    done
+    for word in "${remove_words[@]}"; do
+        kept=()
+        for known in "${words[@]}"; do
+            [ "${known,,}" = "${word,,}" ] || kept+=("$known")
+        done
+        words=("${kept[@]}")
+    done
+    content=""
+    for word in "${words[@]}"; do content+="$word"$'\n'; done
+    meet_write_atomic "$words_file" "$content"
+    changed=1
+fi
+
+if (( ${#add_glossary[@]} > 0 )); then
+    content="$(control_lines "$glossary_file")"
+    [ -n "$content" ] && content+=$'\n'
+    for entry in "${add_glossary[@]}"; do content+="$entry"$'\n'; done
+    meet_write_atomic "$glossary_file" "$content"
+    changed=1
+fi
+
+list_or_none() {
+    local lines
+    lines="$(control_lines "$1" | paste -sd'|' - | sed 's/|/; /g')"
+    printf '%s' "${lines:-$2}"
+}
+
+echo "meet $MEET_STAMP$( (( changed )) && echo ", file di controllo aggiornati")"
+echo "temi attivi: $(list_or_none "$themes_file" nessuno)"
+echo "parole chiave: $(list_or_none "$words_file" nessuna)"
+echo "glossario del meet: $(list_or_none "$glossary_file" vuoto)"
+echo "temi del plugin: $(control_lines "$plugin_dir/pulizia/temi.txt" | sed 's/:.*//' | paste -sd, - | sed 's/,/, /g')"

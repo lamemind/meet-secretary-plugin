@@ -1,0 +1,10 @@
+# Trigger del nome del segretario: il nome conta solo sulle righe della voce dell'utente, e l'evento
+# scatta a fine turno dell'utente (cambio di voce o 3 s senza righe). Le righe con # non contano.
+# voce: il nome dell'utente come lo scrive Teams nei sottotitoli, per esempio `ROSSI Mario`. Finche'
+# e' vuota, il nome del segretario non sveglia nessuno.
+voce:
+# nome: regex Java, senza distinzione fra maiuscole e minuscole, col nome del segretario e le sue storpiature.
+# Le storpiature non sono ancora misurate: si aggiungono quando un meet dal vivo mostra come Teams scrive il nome.
+nome: (?<![\p{L}])(anacleto)(?![\p{L}])
+# segretario: il nome del segretario come lo dice l'utente, per la skill che lo presenta.
+segretario: Anacleto

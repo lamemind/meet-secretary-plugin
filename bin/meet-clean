@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# meet-clean — lancia lo script di pulizia del meet (pulizia/MeetCleaner.java) col JDK 25 o superiore.
+# Si lancia dalla cartella del progetto di cui il meet parla: il claude -p della pulizia gira li' e ne
+# carica il CLAUDE.md. Gli argomenti passano a MeetCleaner; --meet accetta anche lo stamp del meet.
+# Senza --meet aggancia il meet in corso nella cartella dei meet di meet-recorder.
+#
+#   meet-clean [--meet <stamp|file.tsv>] [--replay] [--tag <nome>] [--model <m>] [--effort <livello>] ...
+#
+# Esce con 4 se un'altra pulizia gira gia' sullo stesso meet.
+
+plugin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$plugin_dir/lib/meet-common.sh"
+
+meet_find_jdk || meet_die "nessun JDK $MEET_JDK_MIN_MAJOR o superiore nelle cartelle note: installalo con installa-strumenti.bat, che lo mette in %USERPROFILE%\\dev-tools\\jdk-25"
+java_exe="$MEET_JDK_HOME/bin/java.exe"
+
+# --meet <stamp> diventa il path Windows del .tsv, cercato nella cartella dei meet (--cartella, se
+# c'e', o quella di meet-recorder).
+meet_directory=""
+arguments=("$@")
+for (( index = 0; index < ${#arguments[@]}; index++ )); do
+    [ "${arguments[$index]}" = "--cartella" ] && meet_directory="${arguments[$((index + 1))]:-}"
+done
+for (( index = 0; index < ${#arguments[@]}; index++ )); do
+    if [ "${arguments[$index]}" = "--meet" ] && [ -n "${arguments[$((index + 1))]:-}" ]; then
+        meet_resolve "${arguments[$((index + 1))]}" "$meet_directory" || meet_die "$MEET_ERROR"
+        arguments[$((index + 1))]="$(meet_windows_path "$MEET_FILE")"
+    fi
+done
+
+config_dir="$(meet_windows_path "$plugin_dir/pulizia")"
+main_source="$(meet_windows_path "$plugin_dir/pulizia/MeetCleaner.java")"
+
+# Java non risale oltre la prima bash di Git Bash (ProcessHandle.parent() si ferma li'): i PID Windows
+# delle shell sopra questa li legge lo script da /proc, e MeetCleaner esce quando una non c'e' piu'.
+# Lanciato in background da Claude Code, la prima e' la shell del tool, che muore con la sessione.
+watched_pids=""
+ancestor=$PPID
+while [ -n "$ancestor" ] && [ "$ancestor" != "1" ] && [ -r "/proc/$ancestor/winpid" ]; do
+    watched_pids="${watched_pids:+$watched_pids,}$(cat "/proc/$ancestor/winpid")"
+    ancestor="$(cat "/proc/$ancestor/ppid" 2>/dev/null)"
+done
+
+"$java_exe" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 "$main_source" --config "$config_dir" \
+    ${watched_pids:+--sorveglia "$watched_pids"} "${arguments[@]}"

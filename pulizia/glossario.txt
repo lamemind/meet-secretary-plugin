@@ -1,0 +1,9 @@
+# Glossario del riformulatore: i termini scritti come vanno scritti. Le righe con # non entrano nel
+# prompt. I nomi dei partecipanti non stanno qui: arrivano nei messaggi, dal file del meet. Il
+# glossario di un meet si aggiunge in <stamp>.glossario, accanto al meet.
+Rilascio e codice: UAT, develop, master, release, hotfix, feature, branch, merge, merge request, MR, rebase, commit, push, pull, fetch, cherry-pick, tag, deploy, rollback, pipeline, build, Jenkins, SonarQube, Nexus, Maven, GitLab, GitHub, repo, submodule, worktree
+Ticket e processo: Jira, ticket, story, epic, task, sprint, backlog, refinement, stand-up, demo, review, code review, ADR, Confluence, Xray, test plan
+Architettura: microservizio, BFF, frontend, backend, API, REST, endpoint, payload, DTO, JSON, mapper, client, gateway, nginx, Quarkus, Vert.x, Vue, Vuex, Hibernate, Panache, JDBI, Kafka, topic, consumer, producer, outbox, trigger, cache, scheduler, Quartz, job, batch, verticle
+Dati: Oracle, SQL, query, schema, DBO, tabella, view, stored procedure, DBLink, IntelliJ, DBeaver, CSV, Excel
+Infrastruttura: Kubernetes, kubectl, pod, cluster, namespace, container, Docker, log, Kibana, Keycloak, IAM, SSO, token, login, VPN, PowerShell, Git Bash, Teams, Outlook, SharePoint, OneDrive
+Claude: Claude, Claude Code, prompt, agente, subagent, skill, plugin, MCP, hook

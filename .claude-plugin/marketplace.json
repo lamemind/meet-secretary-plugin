@@ -1,0 +1,16 @@
+{
+  "name": "meet-secretary",
+  "owner": {
+    "name": "lamemind"
+  },
+  "metadata": {
+    "description": "Il segretario dei meet Teams per Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "meet-secretary",
+      "source": "./",
+      "description": "Segretario dei meet Teams: meet-recorder registra i sottotitoli, la pulizia li corregge e sveglia Claude Code sugli eventi del meet"
+    }
+  ]
+}

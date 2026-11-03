@@ -1,0 +1,9 @@
+{
+  "name": "meet-secretary",
+  "description": "Segretario dei meet Teams: meet-recorder registra i sottotitoli, la pulizia li corregge e sveglia Claude Code sugli eventi del meet",
+  "version": "0.2.0",
+  "author": {
+    "name": "lamemind"
+  },
+  "repository": "https://github.com/lamemind/meet-secretary-plugin"
+}
