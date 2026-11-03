@@ -22,7 +22,8 @@ L'installazione guidata del recorder (JDK, cartella dei meet, avvio al login, ag
 
 ## Configurazione
 
-`%LOCALAPPDATA%\meet-recorder\config.properties`, chiave `cartella`: dove il recorder scrive i meet. Default `%USERPROFILE%\meet-teams`.
+- `%LOCALAPPDATA%\meet-recorder\config.properties` — della persona, vale in ogni progetto. Chiave `cartella`: dove il recorder scrive i meet, default `%USERPROFILE%\meet-teams`. Chiave `voce`: il tuo nome come lo scrive Teams nei sottotitoli, per esempio `ROSSI Mario`; senza, il nome del segretario non lo sveglia.
+- `.meet-secretary/settings.ini` nella cartella del progetto — temi, parole chiave, glossario, nome del segretario e tempi del follower di quel progetto. Lo crea la skill al primo `/follow-meet` e lo cambia su richiesta in chat; si può anche modificare a mano, e la pulizia lo rilegge ogni 10 s. Il file è personale: la skill lo mette in `.git/info/exclude` del progetto. Il plugin non porta temi di default.
 
 ## Dati dei meet
 
