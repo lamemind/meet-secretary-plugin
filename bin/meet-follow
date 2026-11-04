@@ -8,6 +8,7 @@ TAIL_SLEEP_SECONDS=0.25
 READ_TIMEOUT_SECONDS=0.5
 DIARY_SILENT_AFTER_MILLIS=90000
 OWNER_CHECK_MILLIS=2000
+SECRETARY_CHECK_MILLIS=1000
 
 usage() {
     cat <<'USAGE'
@@ -15,7 +16,8 @@ meet-follow — segue gli eventi di un meet scritti dallo script di pulizia (<st
 stampa una riga per evento. Pensato come comando del tool Monitor di Claude Code: ogni riga su stdout
 e' una notifica, cioe' un turno del segretario.
 
-  meet-follow [--meet S] [--dir D] [--progetto P] [--from-line N] [--min-gap-seconds G] [--batch-seconds B]
+  meet-follow [--meet S] [--dir D] [--progetto P] [--from-line N] [--min-gap-seconds G]
+              [--batch-seconds B] [--timeout-seconds T]
       --meet S             stamp o .tsv del meet; senza, il meet in corso nella cartella dei meet
       --dir D              cartella dei meet, default quella di meet-recorder (config.properties)
       --progetto P         cartella del progetto, col file di settings .meet-secretary/settings.ini;
@@ -28,15 +30,26 @@ e' una notifica, cioe' un turno del segretario.
                            per tema e per parola; nome e fine escono subito e si portano dietro quelli
                            in attesa. Default la chiave batch della sezione [segui] del file di
                            settings, letta all'avvio, o 60
+      --timeout-seconds T  dopo T secondi senza risvegli del segretario stampa una riga timeout, se in
+                           <stamp>.rif.tsv ci sono tratti di lavoro dopo il segnalibro del segretario;
+                           senza, aspetta il primo. 0 lo spegne. Default la chiave timeout della
+                           sezione [segui] del file di settings, letta all'avvio: vuota, 0 o non
+                           valida, nessun timeout
 
 Righe stampate:
   #<n> <ora> nome: <voce> chiama il segretario, righe a-b
   #<n> <ora> tema <tema>, righe a-b [(k eventi)]
   #<n> <ora> parola «<parole>», righe a-b [(k eventi)]
   #<n> <ora> fine: meet pulito fino alla riga <a>
+  timeout: nessun risveglio da <s> s, <k> tratti di lavoro da leggere dalle <ora>, righe a-b
   meet-follow: <messaggio>      meet seguito, registratore muto
 n e' il numero dell'evento nel file degli eventi. Esce dopo l'evento fine. Un meet-follow nuovo sullo
 stesso meet prende il posto di quello vecchio, che esce senza stampare.
+
+Il conto del timeout riparte a ogni riga stampata e a ogni spostamento di <stamp>.segnalibro-segretario,
+cioe' a ogni lettura del segretario. Un batch di eventi tema e parola in attesa allo scadere esce al
+posto della riga timeout. L'ora dell'ultimo risveglio sta in <stamp>.segnalibro-segui, chiave
+risveglio: un riarmo continua il conto.
 USAGE
 }
 
@@ -65,6 +78,7 @@ project_dir=""
 from_line=""
 min_gap_seconds=3
 batch_seconds=""
+timeout_seconds=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -74,18 +88,25 @@ while [ $# -gt 0 ]; do
         --from-line)       from_line="$2";       shift 2 ;;
         --min-gap-seconds) min_gap_seconds="$2"; shift 2 ;;
         --batch-seconds)   batch_seconds="$2";   shift 2 ;;
+        --timeout-seconds) timeout_seconds="$2"; shift 2 ;;
         -h|--help)         usage; exit 0 ;;
         *)                 meet_die "opzione non riconosciuta: $1" ;;
     esac
 done
 
 [[ "$min_gap_seconds" =~ ^[0-9]+$ ]] || meet_die "--min-gap-seconds vuole un intero di secondi: $min_gap_seconds"
-if [ -n "$batch_seconds" ]; then
-    [[ "$batch_seconds" =~ ^[0-9]+$ ]] || meet_die "--batch-seconds vuole un intero di secondi: $batch_seconds"
-else
-    # Dal file di settings, all'avvio: un cambio vale dal riarmo dopo. Un valore non valido non ferma il
-    # follower, che resterebbe muto per tutto il meet: vale il default, con un avviso su stderr.
+[ -z "$batch_seconds" ] || [[ "$batch_seconds" =~ ^[0-9]+$ ]] \
+    || meet_die "--batch-seconds vuole un intero di secondi: $batch_seconds"
+[ -z "$timeout_seconds" ] || [[ "$timeout_seconds" =~ ^[0-9]+$ ]] \
+    || meet_die "--timeout-seconds vuole un intero di secondi: $timeout_seconds"
+
+# batch e timeout dal file di settings, all'avvio: un cambio vale dal riarmo dopo. Un valore non valido
+# non ferma il follower, che resterebbe muto per tutto il meet: batch vale il default, timeout si
+# spegne, perche' per il timeout lo spento e' gia' il default; entrambi con un avviso su stderr.
+if [ -z "$batch_seconds" ] || [ -z "$timeout_seconds" ]; then
     meet_settings_load "$project_dir"
+fi
+if [ -z "$batch_seconds" ]; then
     meet_settings_value_into segui batch batch_seconds
     if [ -n "$batch_seconds" ] && ! [[ "$batch_seconds" =~ ^[0-9]+$ ]]; then
         echo "meet-follow: batch non valido nel file di settings ($batch_seconds): uso $MEET_DEFAULT_BATCH_SECONDS s" >&2
@@ -93,17 +114,30 @@ else
     fi
     batch_seconds="${batch_seconds:-$MEET_DEFAULT_BATCH_SECONDS}"
 fi
+if [ -z "$timeout_seconds" ]; then
+    meet_settings_value_into segui timeout timeout_seconds
+    if [ -n "$timeout_seconds" ] && ! [[ "$timeout_seconds" =~ ^[0-9]+$ ]]; then
+        echo "meet-follow: timeout non valido nel file di settings ($timeout_seconds): nessun timeout" >&2
+        timeout_seconds=""
+    fi
+    timeout_seconds="${timeout_seconds:-0}"
+fi
+# 10#: un valore scritto con lo zero davanti, `08`, in bash e' ottale e fermerebbe lo script.
+min_gap_seconds=$(( 10#$min_gap_seconds ))
+batch_seconds=$(( 10#$batch_seconds ))
+timeout_seconds=$(( 10#$timeout_seconds ))
 meet_resolve "$requested_meet" "$meet_dir" || meet_die "$MEET_ERROR"
 
 events_file="$MEET_BASE.eventi.tsv"
 bookmark_file="$MEET_BASE.segnalibro-segui"
 owner_file="$MEET_BASE.segui"
+segments_file="$MEET_BASE.rif.tsv"
+secretary_bookmark_file="$MEET_BASE.segnalibro-segretario"
 
-if [ -z "$from_line" ]; then
-    saved="$(meet_bookmark_value "$bookmark_file" eventi 0)"
-    [[ "$saved" =~ ^[0-9]+$ ]] || saved=0
-    from_line=$(( saved + 1 ))
-fi
+saved_events="$(meet_bookmark_value "$bookmark_file" eventi 0)"
+[[ "$saved_events" =~ ^[0-9]+$ ]] || saved_events=0
+saved_events=$(( 10#$saved_events ))
+[ -n "$from_line" ] || from_line=$(( saved_events + 1 ))
 [[ "$from_line" =~ ^[1-9][0-9]*$ ]] || meet_die "--from-line vuole un intero da 1 in su: $from_line"
 
 # Un riarmo dopo l'evento fine non avrebbe piu' niente da aspettare.
@@ -135,8 +169,10 @@ exit_if_replaced() {
 
 min_gap_millis=$(( min_gap_seconds * 1000 ))
 batch_millis=$(( batch_seconds * 1000 ))
+timeout_millis=$(( timeout_seconds * 1000 ))
 line_number=$(( from_line - 1 ))
 pending_through=$line_number
+printed_through=$line_number
 partial_event_line=""
 immediate_lines=()
 batch_keys=()
@@ -145,8 +181,35 @@ last_print_millis=0
 last_batch_print_millis=0
 finished=0
 
+# Il conto del timeout parte dall'ultimo risveglio del segretario, salvato nel segnalibro: un follower
+# che riparte dopo la scadenza di Monitor continua il conto del follower di prima. Senza, se il riarmo
+# lo azzerasse ogni 30 minuti, un timeout da 1800 s in su non scatterebbe mai.
+refresh_now
+last_wake_millis=$now
+saved_wake=""
+meet_bookmark_value_into "$bookmark_file" risveglio saved_wake
+wake_saved=0
+if [[ "$saved_wake" =~ ^[1-9][0-9]*$ ]] && (( saved_wake <= now )); then
+    last_wake_millis=$saved_wake
+    wake_saved=1
+fi
+
+# Il segnalibro porta gli eventi gia' stampati, non quelli letti e ancora in attesa nel batch: si
+# salva anche fra una stampa e l'altra, e un riarmo deve ristampare quelli in attesa.
 save_bookmark() {
-    meet_write_atomic "$bookmark_file" "eventi=$pending_through"$'\n'
+    meet_write_atomic "$bookmark_file" "eventi=$printed_through"$'\n'"risveglio=$last_wake_millis"$'\n'
+}
+
+# Il primo follower del meet salva subito l'ora d'avvio, che vale come risveglio: un riarmo prima
+# della prima stampa continua il conto invece di ripartire. Gli eventi restano quelli salvati, anche
+# con --from-line: la prima stampa li riscrive comunque.
+if (( ! wake_saved )); then
+    meet_write_atomic "$bookmark_file" "eventi=$saved_events"$'\n'"risveglio=$last_wake_millis"$'\n'
+fi
+
+mark_wake() {
+    last_wake_millis=$now
+    save_bookmark
 }
 
 range_text() {
@@ -238,7 +301,8 @@ print_pending() {
     batch_from=(); batch_to=(); batch_count=(); batch_time=(); batch_last=()
     last_print_millis=$now
     (( printed_batch )) && last_batch_print_millis=$now
-    save_bookmark
+    printed_through=$pending_through
+    mark_wake
 }
 
 print_pending_if_due() {
@@ -284,6 +348,7 @@ drain_diary() {
         if (( diary_silence_reported )); then
             say "il diario del registratore e' ripartito"
             diary_silence_reported=0
+            mark_wake
         fi
         rest="${diary_line#*$'\t'}"
         [ "${rest%%$'\t'*}" = "fine" ] && recorder_finished=1
@@ -296,13 +361,89 @@ report_diary_silence_if_due() {
     (( silent_millis >= DIARY_SILENT_AFTER_MILLIS )) || return
     say "il diario del registratore e' muto da $(( silent_millis / 1000 )) s: meet-recorder e' caduto o e' stato fermato?"
     diary_silence_reported=1
+    mark_wake
+}
+
+# Il timeout sveglia il segretario sui tratti di lavoro che nessun evento gli ha portato. I tratti si
+# leggono da <stamp>.rif.tsv, un tratto per riga, e di quelli di lavoro (colonna 4 diversa da fuffa)
+# si tengono numero, righe e ora; il segnalibro del segretario dice fin dove li ha letti. Svegliarsi
+# per leggere solo fuffa spenderebbe un turno di contesto per un `—`: senza tratti di lavoro da
+# leggere il conto resta scaduto e la riga timeout esce al primo che arriva.
+segments_read=0
+work_numbers=()
+work_from=()
+work_to=()
+work_time=()
+secretary_segments=0
+meet_bookmark_value_into "$secretary_bookmark_file" tratti secretary_segments
+[[ "$secretary_segments" =~ ^[0-9]+$ ]] || secretary_segments=0
+secretary_segments=$(( 10#$secretary_segments ))
+next_secretary_check=0
+
+drain_segments() {
+    local segment_line rest from to time kind
+    while read -r -t 0 -u 5; do
+        IFS= read -r -u 5 segment_line || break
+        segments_read=$(( segments_read + 1 ))
+        segment_line="${segment_line%$'\r'}"
+        [ -n "$segment_line" ] || continue
+        from="${segment_line%%$'\t'*}"; rest="${segment_line#*$'\t'}"
+        to="${rest%%$'\t'*}";           rest="${rest#*$'\t'}"
+        time="${rest%%$'\t'*}";         rest="${rest#*$'\t'}"
+        kind="${rest%%$'\t'*}"
+        [ "$kind" = "fuffa" ] && continue
+        work_numbers+=("$segments_read")
+        work_from+=("$from")
+        work_to+=("$to")
+        work_time+=("$time")
+    done
+}
+
+# Una lettura del segretario, da una notifica o da tastiera, sposta il suo segnalibro: e' un
+# risveglio, e il conto riparte.
+check_secretary_bookmark() {
+    (( now >= next_secretary_check )) || return
+    next_secretary_check=$(( now + SECRETARY_CHECK_MILLIS ))
+    local read_segments=""
+    meet_bookmark_value_into "$secretary_bookmark_file" tratti read_segments || return
+    [[ "$read_segments" =~ ^[0-9]+$ ]] || return
+    (( 10#$read_segments == secretary_segments )) && return
+    secretary_segments=$(( 10#$read_segments ))
+    exit_unless_owner
+    mark_wake
+}
+
+print_timeout_if_due() {
+    (( now - last_wake_millis >= timeout_millis && now - last_print_millis >= min_gap_millis )) || return
+    if (( ${#batch_keys[@]} > 0 )); then
+        print_pending
+        return
+    fi
+    local index=${#work_numbers[@]} first=-1 count=0
+    while (( index > 0 && work_numbers[index - 1] > secretary_segments )); do
+        index=$(( index - 1 ))
+        first=$index
+        count=$(( count + 1 ))
+    done
+    (( count > 0 )) || return
+    local last=$(( ${#work_numbers[@]} - 1 )) segments_text="tratti di lavoro" line
+    (( count == 1 )) && segments_text="tratto di lavoro"
+    printf -v line 'timeout: nessun risveglio da %d s, %d %s da leggere dalle %s, %s' \
+        $(( (now - last_wake_millis) / 1000 )) "$count" "$segments_text" "${work_time[first]}" \
+        "$(range_text "${work_from[first]}" "${work_to[last]}")"
+    exit_unless_owner
+    printf '%s\n' "$line"
+    last_print_millis=$now
+    mark_wake
 }
 
 events_tail_pid=""
 diary_tail_pid=""
+segments_tail_pid=""
 stop_tails() {
     [ -n "$events_tail_pid" ] && kill "$events_tail_pid" 2>/dev/null
     [ -n "$diary_tail_pid" ] && kill "$diary_tail_pid" 2>/dev/null
+    [ -n "$segments_tail_pid" ] && kill "$segments_tail_pid" 2>/dev/null
 }
 trap stop_tails EXIT
 trap 'exit 0' INT TERM HUP
@@ -311,9 +452,17 @@ exec 3< <(exec tail -n "+$from_line" -F -s "$TAIL_SLEEP_SECONDS" "$events_file" 
 events_tail_pid=$!
 exec 4< <(exec tail -n 0 -F -s "$TAIL_SLEEP_SECONDS" "$MEET_DIARY" 2>/dev/null)
 diary_tail_pid=$!
+# Con il timeout spento i tratti non servono, e non si apre il loro tail.
+if (( timeout_millis > 0 )); then
+    exec 5< <(exec tail -n +1 -F -s "$TAIL_SLEEP_SECONDS" "$segments_file" 2>/dev/null)
+    segments_tail_pid=$!
+    timeout_text="timeout $timeout_seconds s"
+else
+    timeout_text="nessun timeout"
+fi
 
 # Su stderr: ogni riga su stdout e' un turno del segretario, e questa non chiede niente.
-echo "meet-follow: segue gli eventi di $MEET_STAMP dall'evento $from_line, batch $batch_seconds s" >&2
+echo "meet-follow: segue gli eventi di $MEET_STAMP dall'evento $from_line, batch $batch_seconds s, $timeout_text" >&2
 
 while true; do
     read_event_line
@@ -330,6 +479,11 @@ while true; do
         exit 0
     fi
     print_pending_if_due
+    if (( timeout_millis > 0 )); then
+        drain_segments
+        check_secretary_bookmark
+        print_timeout_if_due
+    fi
     report_diary_silence_if_due
     exit_if_replaced
     exit_if_launcher_gone

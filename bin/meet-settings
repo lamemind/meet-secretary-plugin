@@ -63,7 +63,8 @@ nome: (?<![\p{L}])(anacleto)(?![\p{L}])
 segretario: Anacleto
 
 [segui]
-# timeout: in secondi; vuoto, nessun timeout.
+# timeout: dopo tanti secondi senza risvegli il segretario legge i tratti di lavoro che nessun
+# evento gli ha portato; vuoto o 0, nessun timeout.
 timeout:
 # batch: gli eventi tema e parola escono al piu' una volta ogni tanti secondi.
 batch: 60
@@ -332,7 +333,14 @@ meet_windows_path_var config_file
 meet_settings_join_into temi "; " nessuno themes_text
 meet_settings_join_into parole "; " nessuna words_text
 meet_settings_join_into glossario "; " vuoto glossary_text
-seconds_into "$timeout_value" nessuno "nessun timeout" timeout_text
+# Per meet-follow un timeout a 0 e' spento come uno vuoto.
+if [[ "$timeout_value" =~ ^0+$ ]]; then
+    timeout_text="nessun timeout"
+else
+    seconds_into "$timeout_value" "" "nessun timeout" timeout_text
+    timeout_text="${timeout_text:+timeout $timeout_text}"
+    timeout_text="${timeout_text:-nessun timeout}"
+fi
 seconds_into "$batch_value" "$MEET_DEFAULT_BATCH_SECONDS s" "meet-follow usa $MEET_DEFAULT_BATCH_SECONDS s" batch_text
 
 shown_file="$settings_file"
@@ -349,4 +357,4 @@ echo "parole chiave: $words_text"
 echo "glossario: $glossary_text"
 echo "segretario: ${secretary_name:-senza nome}, nome ${name_regex:-assente: il nome non sveglia nessuno}"
 echo "voce: ${user_voice:-non configurata: il nome del segretario non sveglia nessuno} ($config_file)"
-echo "segui: timeout $timeout_text, batch $batch_text"
+echo "segui: $timeout_text, batch $batch_text"

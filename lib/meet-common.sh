@@ -265,6 +265,23 @@ meet_bookmark_value() {
     printf '%s\n' "$default"
 }
 
+# Come meet_bookmark_value, nella variabile nominata e senza subshell, per chi lo chiede a ogni giro.
+# Ritorna 1, e lascia la variabile com'e', se il file non si legge o non ha la chiave: un segnalibro
+# che un altro script sta rinominando non vale come segnalibro vuoto.
+meet_bookmark_value_into() {
+    local _mb_file="$1" _mb_key="$2" _mb_line
+    local -n _mb_value="$3"
+    [ -f "$_mb_file" ] || return 1
+    while IFS= read -r _mb_line || [ -n "$_mb_line" ]; do
+        _mb_line="${_mb_line%$'\r'}"
+        if [ "${_mb_line%%=*}" = "$_mb_key" ]; then
+            _mb_value="${_mb_line#*=}"
+            return 0
+        fi
+    done 2>/dev/null < "$_mb_file"
+    return 1
+}
+
 # Scrive un file per intero passando da un temporaneo, cosi' chi lo legge non lo trova mai a meta'.
 # Il temporaneo porta il PID: due script che scrivono lo stesso file non si rubano il temporaneo.
 meet_write_atomic() {
