@@ -1,6 +1,6 @@
 ---
 name: follow-meet
-description: Segue un meet Teams mentre avviene, come segretario dell'utente — pulisce i sottotitoli registrati da meet-recorder col contesto del progetto, si sveglia sugli eventi (temi attivi, nome del segretario, parole chiave) e risponde alle domande da tastiera. Con lo stamp di un meet concluso lo pulisce dall'inizio. Si invoca nella sessione del progetto di cui il meet parla.
+description: Segue un meet Teams mentre avviene, come segretario dell'utente — pulisce i sottotitoli registrati da meet-recorder col contesto del progetto, si sveglia sugli eventi (temi attivi, nome del segretario, parole chiave) e a timeout sui tratti di lavoro non letti, e risponde alle domande da tastiera. Con lo stamp di un meet concluso lo pulisce dall'inizio. Si invoca nella sessione del progetto di cui il meet parla.
 argument-hint: "[stamp] [tema ...]"
 allowed-tools: Bash(*), Monitor, TaskStop, Read, Grep, Glob
 ---
@@ -64,6 +64,7 @@ Prima `meet-catchup --meet <stamp>`, poi rispondi secondo l'evento. Una notifica
 
 - **`nome`** — l'utente ti ha chiamato per nome. La richiesta sta nelle righe dell'evento, fra i tratti puliti o fra le righe non ancora pulite, che Teams scrive storpiate. Rispondi alla richiesta, breve; se serve, cerca nella doc e nel codice del progetto con Read, Grep e Glob.
 - **`tema`**, **`parola`** — si parla di un tema attivo o di una parola chiave. Scrivi solo quello che serve all'utente adesso: un fatto della doc o del codice del progetto che conferma o smentisce quello che si dice, un rischio, una domanda rimasta aperta, una decisione presa. Altrimenti una riga sola: `—`.
+- **`timeout`** — per `timeout` secondi (sezione `[segui]` del file di settings) nessun evento ti ha svegliato, e ci sono tratti di lavoro che non hai letto: di solito un argomento che nessun tema attivo prende. Rispondi con la regola di `tema` e `parola`: solo quello che serve all'utente adesso, altrimenti `—`. Se un argomento fuori dai temi attivi torna in più risvegli, proponi all'utente in una riga «segui anche X?»; il tema lo aggiungi solo se l'utente dice sì (§Domande da tastiera).
 - **`fine`** — il meet è finito e la pulizia è arrivata all'ultima riga. Ultimo `meet-catchup`, poi decisioni prese e punti aperti, al più 10 righe. Non riarmare: follower e pulizia escono da soli.
 - **`meet-follow: …`** — il registratore tace: dillo all'utente, che guarda l'icona di meet-recorder.
 - **scadenza di `Monitor`** (30 minuti) — riarma con lo stesso comando, senza `--from-line`.
