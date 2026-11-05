@@ -32,7 +32,7 @@ Stanno in `${CLAUDE_PLUGIN_ROOT}/bin` e si lanciano con quel path assoluto, dall
 | `meet-catchup --index` | le fasce per argomento, coi titoli, e l'argomento in corso |
 | `meet-catchup --clean A-B` | i tratti puliti delle righe A-B, fuffa compresa; non sposta niente |
 | `meet-catchup --raw A-B` | il testo grezzo delle righe A-B; non sposta niente |
-| `meet-settings` | il file di settings del progetto: temi, parole chiave, glossario, segretario, voce dell'utente, tempi del follower. Con `--add`, `--remove`, `--add-word`, `--remove-word`, `--add-glossary`, `--remove-glossary`, `--voce` li cambia. Se il file manca lo crea. Non vuole lo stamp |
+| `meet-settings` | il file di settings del progetto: temi, parole chiave, glossario, segretario, voce dell'utente, tempi del follower. Con `--add`, `--remove`, `--add-word`, `--remove-word`, `--add-glossary`, `--remove-glossary`, `--voce`, `--timeout` li cambia. Se il file manca lo crea. Non vuole lo stamp |
 | `meet-clean` | lo script di pulizia, da lanciare in background |
 | `meet-follow` | gli eventi, come comando di `Monitor` |
 
@@ -44,7 +44,7 @@ Temi, parole chiave, glossario e nome del segretario stanno in `.meet-secretary/
 
 La voce dell'utente, il suo nome come lo scrive Teams nei sottotitoli, sta invece in `%LOCALAPPDATA%\meet-recorder\config.properties`, perché vale in ogni progetto. Senza voce il tuo nome non ti sveglia.
 
-Il file lo cambi solo con `meet-settings`. Quello che lo script non cambia (il nome del segretario e la sua regex, `timeout` e `batch` della sezione `[segui]`) l'utente lo cambia a mano nel file: dagli il path, dalla prima riga di `meet-settings`.
+Il file lo cambi solo con `meet-settings`. Quello che lo script non cambia (il nome del segretario e la sua regex, `batch` della sezione `[segui]`) l'utente lo cambia a mano nel file: dagli il path, dalla prima riga di `meet-settings`.
 
 **I dati del meet non escono dalla cartella dei meet.** Non copiare testo del meet in file del progetto, task file, memoria, commit, issue o messaggi verso servizi esterni: la cartella del progetto si sincronizza con altre macchine, la cartella dei meet no. In chat sì.
 
@@ -92,7 +92,7 @@ Prima `meet-catchup --meet <stamp>`, poi rispondi secondo l'evento. Una notifica
 - **`timeout`** — per `timeout` secondi (sezione `[segui]` del file di settings) nessun evento ti ha svegliato, e ci sono tratti di lavoro che non hai letto: di solito un argomento che nessun tema attivo prende. Rispondi con la regola di `tema` e `parola`: solo quello che serve all'utente adesso, altrimenti `—`. Se un argomento fuori dai temi attivi torna in più risvegli, proponi all'utente in una riga «segui anche X?»; il tema lo aggiungi solo se l'utente dice sì (§Domande da tastiera).
 - **`fine`** — il meet è finito e la pulizia è arrivata all'ultima riga. Ultimo `meet-catchup`, poi decisioni prese e punti aperti, al più 10 righe. Non riarmare: follower e pulizia escono da soli.
 - **`meet-follow: …`** — il registratore tace: dillo all'utente, che guarda l'icona di meet-recorder.
-- **scadenza di `Monitor`** (30 minuti) — riarma con lo stesso comando, senza `--from-line`.
+- **scadenza di `Monitor`** (30 minuti) — riarma con lo stesso comando, senza `--from-line`. La fine di un `Monitor` che hai fermato tu con `TaskStop` non è una scadenza: non riarmare.
 - **fine del task della pulizia** — dopo l'evento `fine` è normale. Prima, leggi le ultime righe del suo output, dì all'utente cosa è successo e rilancia la pulizia una volta: riparte dal suo segnalibro.
 
 ## Domande da tastiera
@@ -102,6 +102,11 @@ Prima `meet-catchup --meet <stamp>`, poi rispondi secondo l'evento. Una notifica
 - **«aggiungi la parola X», «togli la parola X»**: `meet-settings --add-word X`, `--remove-word X`. Le parole chiave valgono subito, senza riavvio.
 - **un termine che Teams storpia** («non è iuat, è UAT»): `meet-settings --add-glossary "iuat → UAT"`, `--remove-glossary` per toglierlo. Riavvia il claude della pulizia come un tema.
 - **«il mio nome in Teams è ROSSI Mario»**: `meet-settings --voce "ROSSI Mario"`, scritto come lo scrive Teams nei sottotitoli. Vale subito, e in ogni progetto.
+- **«metti il timeout a 10 minuti», «spegni il timeout»**: `meet-settings --timeout N`, con N in secondi interi (10 minuti: `--timeout 600`); `--timeout 0` lo spegne. `meet-follow` legge il timeout solo quando parte, quindi dopo il cambio riarmi il follower, e il timeout nuovo vale subito invece che fra 30 minuti:
+  1. `TaskStop` sul `Monitor` del follower, col task id dell'ultimo `Monitor` che hai armato
+  2. `Monitor` come al passo 4 di §Meet in corso
+
+  Prima `TaskStop`, poi `Monitor`: il follower sostituito da uno nuovo esce da solo senza stampare, e la fine del suo `Monitor` sembrerebbe la scadenza dei 30 minuti, con un riarmo di troppo che sostituisce il follower appena partito. Il follower nuovo riprende il conto dall'ultimo risveglio: un timeout accorciato può scattare subito. Riarmi allo stesso modo se l'utente dice di aver cambiato `timeout` o `batch` a mano nel file. Senza un `Monitor` armato, come nel meet concluso, non riarmi niente.
 
 ## Contesto
 

@@ -11,7 +11,7 @@ cartella del progetto: temi, parole chiave, glossario, nome del segretario, temp
 pulizia lo rilegge ogni 10 s, quindi un cambio entra anche nel meet in corso.
 
   meet-settings [--progetto DIR] [--add T]... [--remove T]... [--add-word W]... [--remove-word W]...
-                [--add-glossary G]... [--remove-glossary G]... [--voce NOME]
+                [--add-glossary G]... [--remove-glossary G]... [--voce NOME] [--timeout N]
       --progetto DIR       la cartella del progetto; senza, la cartella corrente
       --add T              aggiunge un tema: `nome` o `nome: keyword, keyword` (nome in minuscolo,
                            lettere, cifre e trattini). Ogni tema del file e' attivo: un tratto di
@@ -26,14 +26,18 @@ pulizia lo rilegge ogni 10 s, quindi un cambio entra anche nel meet in corso.
                            `ROSSI Mario`; vuoto lo toglie. Sta in %LOCALAPPDATA%\meet-recorder\
                            config.properties, chiave voce, perche' e' della persona e vale in ogni
                            progetto: senza voce il nome del segretario non sveglia nessuno
+      --timeout N          la chiave timeout della sezione [segui], in secondi interi: dopo N secondi
+                           senza risvegli il segretario legge i tratti di lavoro non letti. 0 spegne
+                           il timeout e scrive la chiave vuota; batch resta com'e'
 
 Stampa sempre i valori. Se il file manca lo crea, con temi, parole e glossario vuoti e il segretario di
 default, e lo mette in .git/info/exclude del progetto: il file e' personale e resta fuori da git, senza
 toccare il .gitignore del team.
 
 Temi e glossario cambiano il system prompt della pulizia, che al chunk dopo riavvia claude: una decina
-di secondi e qualche centesimo. Parole chiave, voce e nome valgono subito, senza riavvio. timeout e
-batch della sezione [segui] si cambiano a mano nel file, e meet-follow li legge quando parte.
+di secondi e qualche centesimo. Parole chiave, voce e nome valgono subito, senza riavvio. batch si
+cambia a mano nel file. meet-follow legge timeout e batch solo quando parte: un cambio vale dal
+riarmo di Monitor dopo.
 USAGE
 }
 
@@ -84,6 +88,8 @@ add_glossary=()
 remove_glossary=()
 set_voice=0
 voice=""
+set_timeout=0
+timeout_seconds=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -95,10 +101,19 @@ while [ $# -gt 0 ]; do
         --add-glossary)    need_value "$@"; add_glossary+=("$2");   shift 2 ;;
         --remove-glossary) need_value "$@"; remove_glossary+=("$2"); shift 2 ;;
         --voce)            need_value "$@"; set_voice=1; voice="$2"; shift 2 ;;
+        --timeout)         need_value "$@"; set_timeout=1; timeout_seconds="$2"; shift 2 ;;
         -h|--help)         usage; exit 0 ;;
         *)                 meet_die "opzione non riconosciuta: $1" ;;
     esac
 done
+
+# Secondi interi, come la chiave del file e --timeout-seconds di meet-follow: niente unita' (10m), che
+# sarebbero una seconda sintassi accanto ai secondi del file. Si controlla prima di creare il file.
+if (( set_timeout )); then
+    [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || meet_die "--timeout vuole un intero di secondi, 0 per spegnerlo: $timeout_seconds"
+    # 10#: un valore con lo zero davanti, `0600`, in bash e' ottale.
+    timeout_seconds=$(( 10#$timeout_seconds ))
+fi
 
 project_dir="${project_dir:-$PWD}"
 meet_unix_path_var project_dir
@@ -195,6 +210,57 @@ settings_replace_section() {
                 write_fresh()
             }
         }' "$settings_file")" || meet_die "file di settings illeggibile: $settings_file"
+    meet_write_atomic "$settings_file" "$content"$'\n' || meet_die "file non scrivibile: $settings_file"
+    meet_settings_load "$project_dir"
+}
+
+# Riscrive una sola voce `chiave: valore` di una sezione e lascia tutto il resto del file com'e',
+# altre voci della sezione comprese: settings_replace_section le riscriverebbe tutte insieme, e in
+# [segui] porterebbe batch sopra il suo commento. Vale la prima voce con quella chiave, come per chi
+# legge il file (meet_settings_value_into, ProjectSettings.value): si riscrive quella. Senza la voce,
+# si aggiunge dopo l'ultima riga non vuota della prima sezione con quel nome; senza la sezione, la
+# sezione si aggiunge in fondo al file. Poi rilegge il file.
+settings_set_value() {
+    local section="$1" key="$2" value="$3" content
+    content="$(MEET_ENTRY="$key:${value:+ $value}" LC_ALL=C awk -v wanted="$section" -v key="$key" '
+        function clean(text) {
+            sub(/\r$/, "", text)
+            if (FNR == 1) sub(/^\xef\xbb\xbf/, "", text)
+            return text
+        }
+        function trim(text) {
+            gsub(/^[ \t]+|[ \t]+$/, "", text)
+            return text
+        }
+        # Primo giro: la riga della voce da riscrivere, o quella dopo cui aggiungerla.
+        NR == FNR {
+            trimmed = trim(clean($0))
+            if (trimmed ~ /^\[[^]]+\]$/) {
+                inside = tolower(trim(substr(trimmed, 2, length(trimmed) - 2))) == wanted
+                if (inside && !section_line) { section_line = FNR; insert_after = FNR; first_section = 1 }
+                else first_section = 0
+                next
+            }
+            if (!inside || trimmed == "") next
+            if (first_section) insert_after = FNR
+            if (target_line || trimmed ~ /^#/ || index(trimmed, ":") == 0) next
+            if (tolower(trim(substr(trimmed, 1, index(trimmed, ":") - 1))) == key) target_line = FNR
+            next
+        }
+        # Secondo giro: il file, con la voce nuova al suo posto.
+        {
+            line = clean($0)
+            if (FNR == target_line) { print ENVIRON["MEET_ENTRY"]; next }
+            print line
+            if (!target_line && FNR == insert_after) print ENVIRON["MEET_ENTRY"]
+        }
+        END {
+            if (!section_line) {
+                print ""
+                print "[" wanted "]"
+                print ENVIRON["MEET_ENTRY"]
+            }
+        }' "$settings_file" "$settings_file")" || meet_die "file di settings illeggibile: $settings_file"
     meet_write_atomic "$settings_file" "$content"$'\n' || meet_die "file non scrivibile: $settings_file"
     meet_settings_load "$project_dir"
 }
@@ -307,6 +373,14 @@ update_list glossario "riga di glossario" add_glossary remove_glossary
 if (( set_voice )); then
     recorder_set_voice "$voice"
     changed+=("voce")
+fi
+
+# 0 scrive la chiave vuota, come il template: per meet-follow sono spenti tutti e due.
+if (( set_timeout )); then
+    timeout_entry=""
+    (( timeout_seconds > 0 )) && timeout_entry="$timeout_seconds"
+    settings_set_value segui timeout "$timeout_entry"
+    changed+=("timeout")
 fi
 
 # I secondi di [segui], nella variabile nominata: il valore, il testo dato se manca, o una nota se non
