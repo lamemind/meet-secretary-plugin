@@ -18,7 +18,9 @@ meet-catchup — quello che il segretario non ha ancora letto di un meet, dai fi
   meet-catchup --clean A-B [--meet S] i tratti puliti che toccano le righe A-B, fuffa compresa
   meet-catchup --raw A-B [--meet S]   le righe A-B del meet, testo grezzo dei sottotitoli
   meet-catchup --status [--meet S]    stato di registratore, pulizia, eventi e segnalibri, poi i
-                                      valori del file di settings: segretario, temi, parole chiave
+                                      quattro canali che svegliano il segretario, coi valori del file
+                                      di settings: temi attivi, parole chiave, segretario, timeout. Un
+                                      canale spento dice `canale spento` e la causa
 
   --meet S      stamp o .tsv del meet; senza, il meet in corso nella cartella dei meet
   --dir D       cartella dei meet, default quella di meet-recorder (config.properties)
@@ -196,6 +198,7 @@ case "$mode" in
         else
             echo "eventi: nessuno"
         fi
+        echo "segnalibro del segretario: tratto $secretary_segments di $segments_total"
         meet_settings_load "$project_dir"
         shown_file="$MEET_SETTINGS_FILE"
         meet_windows_path_var shown_file
@@ -204,9 +207,11 @@ case "$mode" in
         else
             echo "impostazioni: assenti ($shown_file), le crea meet-settings"
         fi
-        meet_settings_value_into segretario segretario secretary_name
-        meet_recorder_config_get voce user_voice
-        echo "segretario: ${secretary_name:-senza nome}, chiamato dalla voce ${user_voice:-non configurata}; letto fino al tratto $secretary_segments di $segments_total"
+        # I quattro canali che svegliano il segretario, uno per riga, nell'ordine del riepilogo della
+        # skill all'aggancio. Un canale spento lo dice, con la causa, con le stesse regole di chi lo
+        # usa: la pulizia per temi, parole e nome (MeetCleaner.applySecretary), meet-follow per il
+        # timeout. Una regex del nome che non compila in Java qui non si vede: la pulizia la spegne e
+        # lo scrive nel suo output.
         meet_settings_lines_into temi theme_lines
         themes=""
         for theme in "${theme_lines[@]}"; do
@@ -214,9 +219,32 @@ case "$mode" in
             meet_trim_var theme
             themes+="${themes:+, }${theme,,}"
         done
-        meet_settings_join_into parole ", " nessuna words
-        echo "temi attivi: ${themes:-nessuno}"
-        echo "parole chiave: $words"
+        echo "temi attivi: ${themes:-nessuno, canale spento}"
+        meet_settings_join_into parole ", " "" words
+        echo "parole chiave: ${words:-nessuna, canale spento}"
+        meet_settings_value_into segretario segretario secretary_name
+        meet_settings_value_into segretario nome name_regex
+        meet_recorder_config_get voce user_voice
+        name_off_causes=""
+        [ -n "$user_voice" ] || name_off_causes="voce non configurata"
+        [ -n "$name_regex" ] || name_off_causes+="${name_off_causes:+, }regex del nome assente"
+        if [ -n "$name_off_causes" ]; then
+            echo "segretario: ${secretary_name:-senza nome}, canale spento: $name_off_causes"
+        else
+            echo "segretario: ${secretary_name:-senza nome}, chiamato dalla voce $user_voice"
+        fi
+        # Il timeout scritto nel file, che meet-follow legge quando parte: vuoto, 0 o non intero, il
+        # follower non ha timeout.
+        meet_settings_value_into segui timeout timeout_value
+        if [ -z "$timeout_value" ]; then
+            echo "timeout: canale spento"
+        elif ! [[ "$timeout_value" =~ ^[0-9]+$ ]]; then
+            echo "timeout: canale spento, valore non valido «$timeout_value»"
+        elif (( 10#$timeout_value == 0 )); then
+            echo "timeout: canale spento"
+        else
+            echo "timeout: $(( 10#$timeout_value )) s"
+        fi
         exit 0 ;;
 esac
 
