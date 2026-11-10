@@ -82,6 +82,9 @@ final class ClaudeSession implements AutoCloseable {
         environment.remove("LOOM_TASK");
         environment.remove("PROJECT_ROOT");
         environment.remove("PTYXIS_PROFILE");
+        // Una sessione Claude Code col debugger acceso esporta BUN_INSPECT con la sua porta: il figlio
+        // che la eredita prova ad aprire la stessa porta, fallisce con EADDRINUSE ed esce subito.
+        environment.remove("BUN_INSPECT");
         ClaudeSession session = new ClaudeSession(builder.start());
         session.startReaders();
         return session;
