@@ -13,7 +13,7 @@ set -uo pipefail
 plugin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$plugin_dir/lib/meet-common.sh"
 
-meet_find_jdk || meet_die "nessun JDK $MEET_JDK_MIN_MAJOR o superiore nelle cartelle note: installalo con installa-strumenti.bat, che lo mette in %USERPROFILE%\\dev-tools\\jdk-25"
+meet_find_jdk || meet_die "$(meet_jdk_missing_message)"
 java_exe="$MEET_JDK_HOME/bin/java.exe"
 
 # --meet <stamp> diventa il path Windows del .tsv, cercato nella cartella dei meet (--cartella, se

@@ -296,23 +296,33 @@ meet_windows_process_alive() {
     tasklist //FI "PID eq $pid" //NH //FO CSV 2>/dev/null | grep -qi "\"$image\""
 }
 
-# Il JDK con la versione piu' alta dalla 25 in su, cercato come fa meet-recorder.bat (le cartelle di
-# installa-strumenti.bat, poi JAVA_HOME). Un JDK vale se ha il file release, java.exe e javac.exe: il
-# lancio da sorgente usa il compilatore. Imposta MEET_JDK_HOME e MEET_JDK_VERSION.
 MEET_JDK_MIN_MAJOR=25
+
+# Le cartelle dove si cercano i JDK, in forma Windows, nell'ordine di meet-recorder.bat: quelle degli
+# installer sotto Program Files, poi .jdks e dev-tools nel profilo. Riempie l'array nominato. Una
+# lista sola per la ricerca e per il messaggio di meet_jdk_missing_message.
+meet_jdk_search_roots_into() {
+    local -n _mj_roots="$1"
+    local _mj_program_files="${ProgramFiles:-C:\\Program Files}" _mj_profile="${USERPROFILE:-$HOME}"
+    meet_windows_path_var _mj_profile
+    _mj_roots=("$_mj_program_files\\Java" "$_mj_program_files\\Eclipse Adoptium" "$_mj_program_files\\Microsoft"
+               "$_mj_program_files\\Zulu" "$_mj_program_files\\Amazon Corretto" "$_mj_program_files\\BellSoft"
+               "$_mj_profile\\.jdks" "$_mj_profile\\dev-tools")
+}
+
+# Il JDK con la versione piu' alta dalla 25 in su, cercato come fa meet-recorder.bat: le cartelle di
+# meet_jdk_search_roots_into, poi JAVA_HOME; il PATH no. Un JDK vale se ha il file release, java.exe
+# e javac.exe: il lancio da sorgente usa il compilatore, un JRE non basta. Imposta MEET_JDK_HOME e
+# MEET_JDK_VERSION.
 meet_find_jdk() {
     MEET_JDK_HOME=""
     MEET_JDK_VERSION=""
     local best_major=0 root candidate version major
-    local program_files
-    program_files="$(meet_unix_path "${ProgramFiles:-C:\\Program Files}")"
-    local profile
-    profile="$(meet_unix_path "${USERPROFILE:-$HOME}")"
-    local roots=("$program_files/Java" "$program_files/Eclipse Adoptium" "$program_files/Microsoft"
-                 "$program_files/Zulu" "$program_files/Amazon Corretto" "$program_files/BellSoft"
-                 "$profile/.jdks" "$profile/dev-tools")
+    local roots=()
+    meet_jdk_search_roots_into roots
     local candidates=()
     for root in "${roots[@]}"; do
+        meet_unix_path_var root
         [ -d "$root" ] || continue
         for candidate in "$root"/*/; do
             [ -d "$candidate" ] && candidates+=("${candidate%/}")
@@ -332,4 +342,18 @@ meet_find_jdk() {
         MEET_JDK_VERSION="$version"
     done
     [ -n "$MEET_JDK_HOME" ]
+}
+
+# Il messaggio di quando meet_find_jdk non trova niente, lo stesso di meet-recorder.bat: cosa
+# installare, le cartelle dove si cerca, JAVA_HOME per un JDK installato altrove.
+meet_jdk_missing_message() {
+    local roots=() root
+    meet_jdk_search_roots_into roots
+    printf 'nessun JDK %s o superiore nelle cartelle note.\n' "$MEET_JDK_MIN_MAJOR"
+    printf 'Installa un JDK %s o superiore (il JDK, con javac: un JRE non basta), poi rilancia. Si cerca in:\n' \
+        "$MEET_JDK_MIN_MAJOR"
+    for root in "${roots[@]}"; do
+        printf '  %s\n' "$root"
+    done
+    printf "e nella cartella di JAVA_HOME: un JDK installato altrove si trova impostando JAVA_HOME sulla sua cartella."
 }

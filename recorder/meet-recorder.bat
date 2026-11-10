@@ -11,9 +11,10 @@ rem   meet-recorder.bat avvia                          avvia adesso l'app del tr
 rem   meet-recorder.bat console [argomenti]            stesso ciclo in questa console, Invio per fermare
 rem   meet-recorder.bat replay ^<registro-watch.tsv^>    replay di un registro del probe
 rem
-rem Il JDK si cerca nelle cartelle di installa-strumenti.bat; vince il JDK con la versione piu' alta,
-rem dalla 25 in su. PATH e JAVA_HOME non cambiano. L'avvio al login e' la voce meet-recorder della
-rem chiave Run di HKCU: il javaw.exe di quel JDK per path, seguito dal sorgente MeetRecorder.java.
+rem Il JDK si cerca nelle cartelle di JDK_ROOTS, poi in JAVA_HOME; il PATH no. Vince il JDK con la
+rem versione piu' alta, dalla 25 in su. PATH e JAVA_HOME non cambiano. L'avvio al login e' la voce
+rem meet-recorder della chiave Run di HKCU: il javaw.exe di quel JDK per path, seguito dal sorgente
+rem MeetRecorder.java.
 rem
 rem La copia stabile: installa, lanciato da fuori %LOCALAPPDATA%\meet-recorder\app, copia li' questa
 rem cartella e prosegue dalla copia, cosi' voce Run e avvio puntano alla copia. La cache dei plugin di
@@ -30,6 +31,9 @@ set "STABLE_COPY_DIR=%RECORDER_HOME%\app"
 set "RUN_KEY=HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
 set "RUN_VALUE=meet-recorder"
 set "JDK_MIN_MAJOR=25"
+rem Le cartelle degli installer sotto Program Files, poi .jdks e dev-tools nel profilo: le stesse di
+rem meet_jdk_search_roots_into in lib/meet-common.sh. Una lista sola per la ricerca e per il messaggio.
+set JDK_ROOTS="%ProgramFiles%\Java" "%ProgramFiles%\Eclipse Adoptium" "%ProgramFiles%\Microsoft" "%ProgramFiles%\Zulu" "%ProgramFiles%\Amazon Corretto" "%ProgramFiles%\BellSoft" "%USERPROFILE%\.jdks" "%USERPROFILE%\dev-tools"
 set "NATIVE_ACCESS=--enable-native-access=ALL-UNNAMED"
 set "LOG_FILE=%RECORDER_HOME%\meet-recorder.log"
 set "EXIT_RECORDER_RUNNING=3"
@@ -40,11 +44,7 @@ if "%COMMAND%"=="" set "COMMAND=avvia"
 if /i "%COMMAND%"=="rimuovi" goto :remove
 
 call :find_jdk
-if not defined JDK_HOME (
-    echo [ERRORE] Nessun JDK %JDK_MIN_MAJOR% o superiore nelle cartelle note.
-    echo Installalo con installa-strumenti.bat, che lo mette in %%USERPROFILE%%\dev-tools\jdk-25, poi rilancia.
-    exit /b 1
-)
+if not defined JDK_HOME goto :no_jdk
 echo JDK %JDK_VERSION%: %JDK_HOME%
 
 if /i "%COMMAND%"=="installa" goto :install
@@ -54,6 +54,14 @@ if /i "%COMMAND%"=="replay" goto :replay
 echo [ERRORE] comando sconosciuto: %COMMAND%
 echo uso: meet-recorder.bat installa [cartella] ^| rimuovi ^| avvia ^| console [argomenti] ^| replay ^<registro^>
 exit /b 2
+
+rem Lo stesso messaggio di meet_jdk_missing_message in lib/meet-common.sh.
+:no_jdk
+echo [ERRORE] Nessun JDK %JDK_MIN_MAJOR% o superiore nelle cartelle note.
+echo Installa un JDK %JDK_MIN_MAJOR% o superiore (il JDK, con javac: un JRE non basta), poi rilancia. Si cerca in:
+for %%R in (%JDK_ROOTS%) do echo   %%~R
+echo e nella cartella di JAVA_HOME: un JDK installato altrove si trova impostando JAVA_HOME sulla sua cartella.
+exit /b 1
 
 :install
 call :same_directory "%RECORDER_DIR%" "%STABLE_COPY_DIR%"
@@ -131,7 +139,7 @@ rem JDK vale se ha il file release, javaw.exe e javac.exe: il lancio da sorgente
 set "JDK_HOME="
 set "JDK_VERSION="
 set "JDK_MAJOR_FOUND=0"
-for %%R in ("%ProgramFiles%\Java" "%ProgramFiles%\Eclipse Adoptium" "%ProgramFiles%\Microsoft" "%ProgramFiles%\Zulu" "%ProgramFiles%\Amazon Corretto" "%ProgramFiles%\BellSoft" "%USERPROFILE%\.jdks" "%USERPROFILE%\dev-tools") do if exist "%%~R\" for /d %%D in ("%%~R\*") do call :consider_jdk "%%~D"
+for %%R in (%JDK_ROOTS%) do if exist "%%~R\" for /d %%D in ("%%~R\*") do call :consider_jdk "%%~D"
 if defined JAVA_HOME call :consider_jdk "%JAVA_HOME%"
 exit /b 0
 
