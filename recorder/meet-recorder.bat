@@ -3,8 +3,9 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 rem meet-recorder.bat - registratore dei sottotitoli dei meet Teams, col JDK 25 o superiore.
 rem
-rem   meet-recorder.bat installa [cartella dei meet]   avvio al login e avvio adesso; la cartella, se c'e',
-rem                                                    va nella configurazione (default %USERPROFILE%\meet-teams)
+rem   meet-recorder.bat installa [cartella dei meet]   copia stabile, avvio al login e avvio adesso; la
+rem                                                    cartella, se c'e', va nella configurazione
+rem                                                    (default %USERPROFILE%\meet-teams)
 rem   meet-recorder.bat rimuovi                        toglie l'avvio al login
 rem   meet-recorder.bat avvia                          avvia adesso l'app del tray (anche senza argomenti)
 rem   meet-recorder.bat console [argomenti]            stesso ciclo in questa console, Invio per fermare
@@ -13,15 +14,25 @@ rem
 rem Il JDK si cerca nelle cartelle di installa-strumenti.bat; vince il JDK con la versione piu' alta,
 rem dalla 25 in su. PATH e JAVA_HOME non cambiano. L'avvio al login e' la voce meet-recorder della
 rem chiave Run di HKCU: il javaw.exe di quel JDK per path, seguito dal sorgente MeetRecorder.java.
+rem
+rem La copia stabile: installa, lanciato da fuori %LOCALAPPDATA%\meet-recorder\app, copia li' questa
+rem cartella e prosegue dalla copia, cosi' voce Run e avvio puntano alla copia. La cache dei plugin di
+rem Claude Code tiene una cartella per versione e cancella le vecchie dopo un update: una voce Run che
+rem punta li' smette di avviare il recorder senza avvisare. Lanciato dalla copia, installa non copia.
+rem Col recorder acceso installa si rifiuta prima di copiare: il lancio da sorgente compila ogni
+rem classe al primo uso, e ricopiare i .java sotto un recorder acceso mescola due versioni.
 
 set "RECORDER_DIR=%~dp0"
 if "%RECORDER_DIR:~-1%"=="\" set "RECORDER_DIR=%RECORDER_DIR:~0,-1%"
 set "RECORDER_SOURCE=%RECORDER_DIR%\MeetRecorder.java"
+set "RECORDER_HOME=%LOCALAPPDATA%\meet-recorder"
+set "STABLE_COPY_DIR=%RECORDER_HOME%\app"
 set "RUN_KEY=HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
 set "RUN_VALUE=meet-recorder"
 set "JDK_MIN_MAJOR=25"
 set "NATIVE_ACCESS=--enable-native-access=ALL-UNNAMED"
-set "LOG_FILE=%LOCALAPPDATA%\meet-recorder\meet-recorder.log"
+set "LOG_FILE=%RECORDER_HOME%\meet-recorder.log"
+set "EXIT_RECORDER_RUNNING=3"
 
 set "COMMAND=%~1"
 if "%COMMAND%"=="" set "COMMAND=avvia"
@@ -45,6 +56,28 @@ echo uso: meet-recorder.bat installa [cartella] ^| rimuovi ^| avvia ^| console [
 exit /b 2
 
 :install
+call :same_directory "%RECORDER_DIR%" "%STABLE_COPY_DIR%"
+if defined SAME_DIRECTORY goto :install_from_copy
+"%JDK_HOME%\bin\java.exe" %NATIVE_ACCESS% "%RECORDER_SOURCE%" --controlla-acceso >nul
+set "RUNNING_CHECK=%ERRORLEVEL%"
+if "%RUNNING_CHECK%"=="%EXIT_RECORDER_RUNNING%" (
+    echo [ERRORE] meet-recorder e' acceso: chiudilo dal menu dell'icona nel tray ^(Esci^) e rilancia.
+    exit /b 1
+)
+if not "%RUNNING_CHECK%"=="0" (
+    echo [ERRORE] controllo del recorder acceso non riuscito, uscita %RUNNING_CHECK%.
+    exit /b 1
+)
+robocopy "%RECORDER_DIR%" "%STABLE_COPY_DIR%" /MIR /R:2 /W:1 /NJH /NJS /NFL /NDL /NP >nul
+if errorlevel 8 (
+    echo [ERRORE] copia del recorder in !STABLE_COPY_DIR! non riuscita.
+    exit /b 1
+)
+echo Recorder copiato in %STABLE_COPY_DIR%.
+set "RECORDER_DIR=%STABLE_COPY_DIR%"
+set "RECORDER_SOURCE=%STABLE_COPY_DIR%\MeetRecorder.java"
+
+:install_from_copy
 if not "%~2"=="" (
     "%JDK_HOME%\bin\java.exe" %NATIVE_ACCESS% "%RECORDER_SOURCE%" --imposta-cartella "%~2"
     if errorlevel 1 (
@@ -82,6 +115,14 @@ if errorlevel 1 (
     echo Avvio al login tolto.
 )
 echo L'app gia' accesa resta accesa: si chiude con Esci nel menu dell'icona.
+exit /b 0
+
+rem SAME_DIRECTORY definita se i due path sono la stessa cartella. Il confronto passa dalla forma
+rem corta di entrambi: %~dp0 puo' arrivare coi nomi 8.3 (C:\Users\ROSSIM~1), %LOCALAPPDATA% no.
+:same_directory
+set "SAME_DIRECTORY="
+if not exist "%~2\" exit /b 0
+if /i "%~s1"=="%~s2" set "SAME_DIRECTORY=1"
 exit /b 0
 
 rem Il JDK con la versione piu' alta, dalla JDK_MIN_MAJOR in su, fra le cartelle note e JAVA_HOME. Un

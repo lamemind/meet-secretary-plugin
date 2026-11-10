@@ -29,6 +29,8 @@ import javax.swing.JOptionPane;
  *                                                                    replay di un registro del probe
  *   java MeetRecorder.java --imposta-cartella <cartella>             scrive la cartella dei meet
  *                                                                    nella configurazione ed esce
+ *   java MeetRecorder.java --controlla-acceso                        esce con 0 se nessun recorder
+ *                                                                    e' acceso, con 3 se uno lo e'
  *
  * La cartella dei meet sta in %LOCALAPPDATA%\meet-recorder\config.properties (RecorderConfig); log
  * e lucchetto dell'istanza nella stessa cartella. Un'istanza sola per utente: l'app del tray e il
@@ -40,8 +42,9 @@ public class MeetRecorder {
     private static final String PREVIOUS_LOG_FILE_NAME = "meet-recorder.log.1";
     private static final String LOCK_FILE_NAME = "meet-recorder.lock";
     private static final long MAX_LOG_BYTES = 5_000_000;
+    private static final int EXIT_RECORDER_RUNNING = 3;
 
-    enum Mode { TRAY, CONSOLE, REPLAY, SET_MEET_DIRECTORY }
+    enum Mode { TRAY, CONSOLE, REPLAY, SET_MEET_DIRECTORY, CHECK_RUNNING }
 
     record Options(Mode mode, Path outputDirectory, Path argumentPath, long seconds, long pollIntervalMillis) {
     }
@@ -58,6 +61,7 @@ public class MeetRecorder {
             System.out.println("     java MeetRecorder.java --console [--out <cartella>] [--seconds <n>] [--interval-ms <n>]");
             System.out.println("     java MeetRecorder.java --replay <registro-watch.tsv> [--out <cartella>]");
             System.out.println("     java MeetRecorder.java --imposta-cartella <cartella>");
+            System.out.println("     java MeetRecorder.java --controlla-acceso");
             System.exit(2);
             return;
         }
@@ -65,6 +69,7 @@ public class MeetRecorder {
         int exitCode = switch (options.mode()) {
             case REPLAY -> CaptionReplay.run(options.argumentPath(), options.outputDirectory());
             case SET_MEET_DIRECTORY -> setMeetDirectory(options.argumentPath());
+            case CHECK_RUNNING -> checkRunning();
             case CONSOLE -> runConsole(options);
             case TRAY -> runTray(options);
         };
@@ -243,6 +248,27 @@ public class MeetRecorder {
         return true;
     }
 
+    /**
+     * Il controllo che meet-recorder.bat installa fa prima di ricopiare i sorgenti: un recorder
+     * acceso tiene il lucchetto dell'istanza. Il lucchetto si prova e si rilascia subito, senza
+     * tenerlo; senza file del lucchetto nessun recorder e' mai partito, e il file non si crea.
+     */
+    private static int checkRunning() throws IOException {
+        Path lockFile = RecorderConfig.applicationDirectory().resolve(LOCK_FILE_NAME);
+        if (Files.exists(lockFile)) {
+            try (FileChannel channel = FileChannel.open(lockFile, StandardOpenOption.WRITE)) {
+                FileLock lock = channel.tryLock();
+                if (lock == null) {
+                    System.out.println("meet-recorder acceso");
+                    return EXIT_RECORDER_RUNNING;
+                }
+                lock.release();
+            }
+        }
+        System.out.println("meet-recorder spento");
+        return 0;
+    }
+
     private static Options parseOptions(String[] args) {
         Mode mode = Mode.TRAY;
         Path outputDirectory = null;
@@ -262,6 +288,7 @@ public class MeetRecorder {
                     mode = Mode.SET_MEET_DIRECTORY;
                     argumentPath = Path.of(valueAfter(args, index++));
                 }
+                case "--controlla-acceso" -> mode = Mode.CHECK_RUNNING;
                 case "--out" -> outputDirectory = Path.of(valueAfter(args, index++));
                 case "--seconds" -> seconds = parsePositive(valueAfter(args, index++), argument);
                 case "--interval-ms" -> pollIntervalMillis = parsePositive(valueAfter(args, index++), argument);
