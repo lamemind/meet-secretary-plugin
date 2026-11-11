@@ -21,37 +21,39 @@ Una volta sola, nell'ordine.
 
 **1. Apri un terminale.** Premi `Win+R`, il tasto Windows e la R insieme: si apre la finestra **Esegui**. Scrivi `cmd` e premi Invio. Si apre il Prompt dei comandi, una finestra nera col cursore.
 
-**2. Aggiungi il marketplace.** Un marketplace è il catalogo da cui Claude Code scarica i plugin: quello di meet-secretary è questo repo GitHub. Incolla nel terminale col tasto destro del mouse, poi premi Invio:
+**2. Aggiungi il marketplace.** Un marketplace è il catalogo da cui Claude Code scarica i plugin: quello di meet-secretary si chiama `lamemind` e sta nel repo GitHub `lamemind/claude-marketplace`. Il catalogo elenca anche loom-works, un altro plugin dello stesso autore: meet-secretary non ne ha bisogno, e aggiungere il catalogo non lo installa. Incolla nel terminale col tasto destro del mouse, poi premi Invio:
 
 ```
-claude plugin marketplace add lamemind/meet-secretary-plugin
+claude plugin marketplace add lamemind/claude-marketplace
 ```
 
-Quando va bene, stampa `Successfully added marketplace: meet-secretary`.
+Quando va bene, stampa `Successfully added marketplace: lamemind`.
 
 **3. Installa il plugin.** Nello stesso terminale:
 
 ```
-claude plugin install meet-secretary@meet-secretary
+claude plugin install meet-secretary@lamemind
 ```
 
-Quando va bene, stampa `Successfully installed plugin: meet-secretary@meet-secretary (scope: user)`: il plugin vale in tutti i tuoi progetti.
+Quando va bene, stampa `Successfully installed plugin: meet-secretary@lamemind (scope: user)`: il plugin vale in tutti i tuoi progetti.
 
 **4. Accendi l'aggiornamento automatico.** Per i marketplace che non sono di Anthropic è spento, e senza il plugin resta alla versione di oggi. Nello stesso terminale scrivi `claude` e premi Invio: parte una sessione di Claude Code. Al primo avvio Claude Code ti chiede il login nel browser e se ti fidi della cartella in cui sei: rispondi di sì. Poi:
 
 1. scrivi `/plugin` e premi Invio
 2. col tasto Tab vai sulla scheda **Marketplaces**
-3. scegli `meet-secretary` con le frecce e premi Invio
+3. scegli `lamemind` con le frecce e premi Invio
 4. scegli **Enable auto-update** e premi Invio
 5. esci dal pannello con Esc, e da Claude Code con `/exit`
 
 **5. Installa il recorder.** Chiudi il terminale. Premi `Win+R`, incolla questa riga intera, virgolette comprese, e premi Invio:
 
 ```
-cmd /k ""%USERPROFILE%\.claude\plugins\marketplaces\meet-secretary\recorder\meet-recorder.bat" installa"
+cmd /k ""%USERPROFILE%\.claude\plugins\cache\lamemind\meet-secretary\0.3.1\recorder\meet-recorder.bat" installa"
 ```
 
-Windows sostituisce da solo `%USERPROFILE%` con la tua cartella utente. Si apre una finestra che resta aperta sul risultato. Quando va bene, mostra righe come queste:
+Windows sostituisce da solo `%USERPROFILE%` con la tua cartella utente. `0.3.1` è la versione del plugin, e la riga funziona solo se è quella che hai installato: `claude plugin list` in un terminale la stampa sotto `meet-secretary@lamemind`, alla voce `Version`. Se la finestra scrive `non è riconosciuto come comando interno o esterno`, la versione nella riga è un'altra: correggi il numero e rilancia.
+
+Si apre una finestra che resta aperta sul risultato. Quando va bene, mostra righe come queste:
 
 ```
 JDK 25.0.1: C:\Program Files\Eclipse Adoptium\jdk-25.0.1.8-hotspot
@@ -79,14 +81,14 @@ Una riga in fondo come `2026-11-10 09:01:18  meet-recorder avviato, Java 25.0.1+
 
 ## Aggiornamenti
 
-**Il plugin si aggiorna da solo**, con l'aggiornamento automatico acceso al passo 4. All'avvio di una sessione Claude Code scarica la versione nuova e scrive `Plugin updated: meet-secretary · Run /reload-plugins to apply`. La sessione successiva usa la versione nuova; `/reload-plugins` la carica subito. L'aggiornamento porta skill, script e pulizia.
+**Il plugin si aggiorna da solo**, con l'aggiornamento automatico acceso al passo 4. All'avvio di una sessione Claude Code scarica la versione nuova e scrive `Plugin updated: meet-secretary · Run /reload-plugins to apply`. La sessione successiva usa la versione nuova; `/reload-plugins` la carica subito. L'aggiornamento porta skill, script e pulizia. Senza l'aggiornamento automatico, la versione nuova arriva con `claude plugin update meet-secretary@lamemind` in un terminale.
 
 **Il recorder non si aggiorna da solo.** La sua copia in `%LOCALAPPDATA%\meet-recorder\app\` resta com'è finché non la rifai tu, con il comando dell'installazione. Fuori da un meet:
 
 1. tasto destro sull'icona di meet-recorder nel tray, poi **Esci**
-2. `Win+R`, la riga del passo 5, Invio
+2. `Win+R`, la riga del passo 5 con la versione che `claude plugin list` stampa per `meet-secretary@lamemind`, Invio
 
-Il recorder va chiuso prima: se è acceso, `installa` si rifiuta e scrive `[ERRORE] meet-recorder e' acceso: chiudilo dal menu dell'icona nel tray (Esci) e rilancia.` La riga del passo 5 installa il recorder della copia del marketplace sul tuo PC. Claude Code la rinnova all'avvio di ogni sessione quando l'aggiornamento automatico è acceso; senza, rinnovala prima con `claude plugin marketplace update meet-secretary` in un terminale. Rifare l'installazione non toglie niente: configurazione, log e meet registrati restano dove sono.
+Il recorder va chiuso prima: se è acceso, `installa` si rifiuta e scrive `[ERRORE] meet-recorder e' acceso: chiudilo dal menu dell'icona nel tray (Esci) e rilancia.` La riga del passo 5 installa il recorder della versione del plugin che porta nel path. Dopo un aggiornamento del plugin la cartella della versione vecchia resta su disco ancora per qualche giorno: con il numero vecchio la riga parte e reinstalla il recorder vecchio, senza errori. Rifare l'installazione non toglie niente: configurazione, log e meet registrati restano dove sono.
 
 **Dopo un cambio di JDK** rifai gli stessi due passi. L'avvio al login contiene il path del JDK con cui hai installato il recorder. Se installi un JDK nuovo in un'altra cartella e togli il vecchio, al login il recorder non parte finché non rilanci la riga del passo 5, che sceglie il JDK con la versione più alta fra quelli che trova.
 
@@ -106,7 +108,7 @@ Il PATH non conta. Un JDK installato altrove si trova con `JAVA_HOME` impostata 
 - `%LOCALAPPDATA%\meet-recorder\config.properties` — tua, vale in ogni progetto.
   - Chiave `cartella`: dove il recorder scrive i meet, default `%USERPROFILE%\meet-teams`. Per sceglierne un'altra all'installazione, aggiungila dopo `installa`, fra virgolette:
     ```
-    cmd /k ""%USERPROFILE%\.claude\plugins\marketplaces\meet-secretary\recorder\meet-recorder.bat" installa "D:\meet""
+    cmd /k ""%USERPROFILE%\.claude\plugins\cache\lamemind\meet-secretary\0.3.1\recorder\meet-recorder.bat" installa "D:\meet""
     ```
   - Chiave `voce`: il tuo nome come lo scrive Teams nei sottotitoli, per esempio `ROSSI Mario`. Senza, il nome del segretario non lo sveglia. Si imposta anche dalla chat di follow-meet: «il mio nome in Teams è ROSSI Mario».
 - `.meet-secretary/settings.ini` nella cartella del progetto — temi, parole chiave, glossario, nome del segretario e tempi del follower di quel progetto. Lo crea la skill al primo `/meet-secretary:follow-meet` e lo cambia su richiesta in chat; si può anche modificare a mano, e la pulizia lo rilegge ogni 10 s. Il file è personale: la skill lo mette in `.git/info/exclude` del progetto. Il plugin non porta temi di default.
